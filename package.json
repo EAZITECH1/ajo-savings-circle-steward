@@ -5,7 +5,7 @@
   "scripts": {
     "dev": "node server/index.mjs",
     "test": "node --test tests/*.test.mjs",
-    "verify:walrus": "node scripts/verify-walrus-mainnet.mjs",
+    "inventory:walrus": "node scripts/inventory-walrus-mainnet.mjs",
     "restore:walrus": "node scripts/restore-from-walrus.mjs"
   },
   "dependencies": {

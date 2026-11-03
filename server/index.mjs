@@ -12,6 +12,7 @@ import { createServer as createViteServer } from 'vite'
 import react from '@vitejs/plugin-react'
 import { fileURLToPath } from 'url'
 import path from 'path'
+import authRoutes from './routes/auth.mjs'
 import tatumRoutes from './routes/tatum.mjs'
 import memoryRoutes from './routes/memory.mjs'
 import stewardRoutes from './routes/steward.mjs'
@@ -70,6 +71,7 @@ app.get('/api/config/status', (_req, res) => {
   })
 })
 
+app.use('/api/auth', authRoutes)
 app.use('/api/tatum', tatumRoutes)
 app.use('/api/memory', memoryRoutes)
 app.use('/api/steward', stewardRoutes)

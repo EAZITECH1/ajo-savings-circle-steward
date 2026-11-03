@@ -117,12 +117,12 @@ test('verifyMemberContributionOnSui: handles unconfigured Tatum, malformed diges
   clearSubmittedDigests('test-circle-sui', 5, '0x0002')
   const graceMemories = [
     {
-      id: 'mem-grace-tunde',
+      id: 'mem-grace-member2',
       category: 'Agreements',
-      title: 'Tunde 72-Hour Contractor Grace Window',
-      quote: 'Tunde may submit his contribution within 72 hours of cycle open.',
+      title: 'Member Two 72-Hour Contractor Grace Window',
+      quote: 'Member Two may submit his contribution within 72 hours of cycle open.',
       memberId: 'm2',
-      walrusBlobId: '_jSFAxHds6FqS3kFOwsKN1M2iVSHbnVt_BX1_YGeQfc',
+      walrusBlobId: 'verified_walrus_blob_grace_001',
     },
   ]
 

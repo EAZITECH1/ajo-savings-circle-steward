@@ -6,11 +6,23 @@ import {
   Member,
   WalrusRestoreOutcome,
 } from './types'
+import { getAuthHeaders } from './walletAuth'
+
+export interface ConfirmationChallengeResponse {
+  nonce: string
+  proposalId: string
+  proposalHash: string
+  message: string
+  issuedAt: string
+  expiresAt: string
+  member: Member
+}
 
 /**
  * Real Walrus Memory implementation of MemoryStore.
  * Communicates with the backend `/api/memory/*` endpoints which hold the
- * server-side @mysten-incubation/memwal delegate key and enforce circle membership.
+ * server-side @mysten-incubation/memwal delegate key and enforce verified wallet
+ * authentication and server-side circle membership.
  */
 export class WalrusMemoryStore implements MemoryStore {
   private circleId: string
@@ -27,6 +39,15 @@ export class WalrusMemoryStore implements MemoryStore {
     return this.circleId
   }
 
+  async listCircles(): Promise<any[]> {
+    const res = await fetch('/api/memory/circles', {
+      headers: getAuthHeaders(),
+    })
+    if (!res.ok) return []
+    const data = await res.json().catch(() => ({ circles: [] }))
+    return Array.isArray(data.circles) ? data.circles : []
+  }
+
   async registerCircle(params: {
     circleId: string
     circleName: string
@@ -41,7 +62,7 @@ export class WalrusMemoryStore implements MemoryStore {
     this.circleId = params.circleId.trim()
     const res = await fetch('/api/memory/circles', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: getAuthHeaders(),
       body: JSON.stringify(params),
     })
     const data = await res.json()
@@ -80,7 +101,7 @@ export class WalrusMemoryStore implements MemoryStore {
 
     const res = await fetch('/api/memory/propose', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: getAuthHeaders(),
       body: JSON.stringify({ ...params, circleId }),
     })
     const data = await res.json()
@@ -88,6 +109,30 @@ export class WalrusMemoryStore implements MemoryStore {
       throw new Error(data.error || `HTTP ${res.status}: Failed to propose memory`)
     }
     return data.proposal
+  }
+
+  async requestConfirmationChallenge(params: {
+    circleId?: string
+    proposalId: string
+    memberId?: string
+  }): Promise<ConfirmationChallengeResponse> {
+    const circleId = params.circleId || this.circleId
+    if (!circleId) throw new Error('No active circleId set for confirmation challenge')
+
+    const res = await fetch('/api/memory/challenge', {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify({
+        circleId,
+        proposalId: params.proposalId,
+        memberId: params.memberId,
+      }),
+    })
+    const data = await res.json()
+    if (!res.ok) {
+      throw new Error(data.error || `HTTP ${res.status}: Failed to issue confirmation challenge`)
+    }
+    return data
   }
 
   async confirmProposal(params: {
@@ -99,51 +144,58 @@ export class WalrusMemoryStore implements MemoryStore {
     signature?: string
     challengeNonce?: string
     publicKeyHex?: string
+    confirmationMode?: 'wallet_signature_verified' | 'organizer_entered'
   }): Promise<MemoryRecord> {
     const circleId = params.circleId || this.circleId
     if (!circleId) throw new Error('No active circleId set for memory confirmation')
 
     const res = await fetch('/api/memory/confirm', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: getAuthHeaders(),
       body: JSON.stringify({ ...params, circleId }),
     })
     const data = await res.json()
     if (!res.ok) {
-      throw new Error(data.error || `HTTP ${res.status}: Failed to confirm and write memory to Walrus`)
+      throw new Error(
+        data.error || `HTTP ${res.status}: Failed to confirm and write memory to Walrus`
+      )
     }
     return data.record
   }
 
   /**
    * Write a confirmed memory record to Walrus Mainnet and wait for job completion.
-   * Requires an authorized member of the circle (`memberId` or `memberAddress`).
+   * Stages a server proposal first so a proposalId is always bound on the server.
    */
   async remember(
-    record: Omit<MemoryRecord, 'id'> & { confirmingMemberId?: string; confirmingMemberAddress?: string }
+    record: Omit<MemoryRecord, 'id'> & {
+      confirmingMemberId?: string
+      confirmingMemberAddress?: string
+    }
   ): Promise<MemoryRecord> {
     const circleId = record.circleId || this.circleId
     if (!circleId) {
       throw new Error('Cannot write to Walrus Memory without an active circleId.')
     }
 
+    const staged = await this.propose({
+      circleId,
+      category: record.category,
+      title: record.title,
+      quote: record.quote,
+      suggestedAction: record.context,
+      memberId: record.memberId,
+      cycle: record.cycle,
+      txDigest: record.txDigest,
+    })
+
     return this.confirmProposal({
       circleId,
-      proposal: {
-        id: `prop-${Date.now()}`,
-        circleId,
-        category: record.category,
-        memoryType: record.memoryType,
-        title: record.title,
-        quote: record.quote,
-        suggestedAction: record.context,
-        memberId: record.memberId,
-        memberIds: record.memberIds,
-        cycle: record.cycle,
-        txDigest: record.txDigest,
-      },
+      proposalId: staged.id,
+      proposal: staged,
       memberId: record.confirmingMemberId || record.memberId,
       memberAddress: record.confirmingMemberAddress,
+      confirmationMode: 'organizer_entered',
     })
   }
 
@@ -155,7 +207,7 @@ export class WalrusMemoryStore implements MemoryStore {
 
     const res = await fetch('/api/memory/recall', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: getAuthHeaders(),
       body: JSON.stringify({
         circleId: this.circleId,
         query,
@@ -174,7 +226,12 @@ export class WalrusMemoryStore implements MemoryStore {
   async list(): Promise<MemoryRecord[]> {
     if (!this.circleId) return []
 
-    const res = await fetch(`/api/memory/list?circleId=${encodeURIComponent(this.circleId)}`)
+    const res = await fetch(
+      `/api/memory/list?circleId=${encodeURIComponent(this.circleId)}`,
+      {
+        headers: getAuthHeaders(),
+      }
+    )
     const data = await res.json()
     if (!res.ok) {
       throw new Error(data.error || `HTTP ${res.status}: Failed to list memories from Walrus`)
@@ -188,7 +245,7 @@ export class WalrusMemoryStore implements MemoryStore {
     }
     const res = await fetch('/api/memory/restore', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: getAuthHeaders(),
       body: JSON.stringify({ circleId: this.circleId, limit }),
     })
     const data = await res.json()

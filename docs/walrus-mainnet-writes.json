@@ -1,9 +1,17 @@
 {
   "verifiedAt": "2026-11-03T12:38:52.533Z",
+  "auditedAt": "2026-11-03T14:35:00.000Z",
   "relayerUrl": "https://relayer.memory.walrus.xyz",
   "accountId": "0xf6b75c6fd44e685829e0baa04077c42c09bed658819e921126dc11ce8c3175d4",
   "circleId": "lagos-techies-seed-circle",
   "namespace": "ajo-circle:lagos-techies-seed-circle",
+  "quarantinedInRuntime": true,
+  "quarantineReason": "All 10 records in namespace ajo-circle:lagos-techies-seed-circle were created by an earlier synthetic verification script describing invented sample-circle members (Amina, Tunde, Chidi, Zainab, Emeka, Folake). Records 1-5 were labeled wallet_signature_verified using an ephemeral Ed25519 keypair that did not derive to the claimed Sui address, and Records 6-10 were organizer_entered sample records. All 10 blob IDs and the lagos-techies-seed-circle namespace are strictly quarantined and blocked from runtime recall, policy evaluation, payout recommendations, and Steward LLM prompts.",
+  "deletionOptions": {
+    "sdkDelegateKeyDeleteSupported": false,
+    "dashboardManualDelete": "Connect owner wallet 0x679d547b18cf9f2e77f1d33f932cbf4de5c63dda6a5c5d0e44caf7ae4334cd1b at https://memory.walrus.xyz/dashboard -> Delete memories panel -> Select the 10 blob IDs -> Delete selected (10).",
+    "programmaticSecurityDeleteApi": "Authenticate owner wallet via POST /api/security-delete-auth/challenge & POST /api/security-delete-auth/verify, list blobs via GET /api/security-deletable-blobs, prepare sponsored tx via POST /api/security-deletions (mode: 'selection', blobIds: [...]), sign txBytes with owner wallet, and submit via POST /api/security-deletions/{batchId}/submit."
+  },
   "totalCompletedMainnetWrites": 10,
   "writes": [
     {
@@ -16,10 +24,13 @@
       "category": "Agreements",
       "memoryType": "agreement",
       "title": "Tunde 72-Hour Contractor Grace Window",
+      "quote": "Tunde can pay up to 72 hours after the 1st of the month when waiting on contractor wire clearance, provided he posts invoice proof.",
+      "context": "Allow a 72-hour grace window for Tunde (m2) on contractor wire delays without late penalty.",
       "cycle": 4,
       "memberId": "m2",
       "confirmationType": "wallet_signature_verified",
       "confirmedBy": "Signed by Amina Bello (0x679d547b18cf9f2e77f1d33f932cbf4de5c63dda6a5c5d0e44caf7ae4334cd1b)",
+      "auditStatus": "QUARANTINED_SYNTHETIC: Fictional member/agreement; signed with ephemeral Ed25519 key unrelated to 0x679d54...cd1b.",
       "elapsedMs": 21112,
       "createdAt": "2026-11-03T12:35:12.041Z"
     },
@@ -33,10 +44,13 @@
       "category": "Member patterns",
       "memoryType": "member_pattern",
       "title": "Emeka Two-Tranche Split Contribution Pattern",
+      "quote": "Emeka splits his 500 USDC contribution into two 250 USDC transfers within 48 hours due to daily mobile bridge limits.",
+      "context": "Aggregate two partial payments from Emeka (m5) within 48 hours as a full contribution once both tranches clear.",
       "cycle": 2,
       "memberId": "m5",
       "confirmationType": "wallet_signature_verified",
       "confirmedBy": "Signed by Amina Bello (0x679d547b18cf9f2e77f1d33f932cbf4de5c63dda6a5c5d0e44caf7ae4334cd1b)",
+      "auditStatus": "QUARANTINED_SYNTHETIC: Fictional member pattern; signed with ephemeral Ed25519 key unrelated to 0x679d54...cd1b.",
       "elapsedMs": 23695,
       "createdAt": "2026-11-03T12:35:35.737Z"
     },
@@ -50,10 +64,13 @@
       "category": "Member patterns",
       "memoryType": "member_pattern",
       "title": "Chidi Early Cycle Liquidity Anchor",
+      "quote": "Chidi consistently settles his full contribution 24 hours before the cycle window opens to anchor pool liquidity.",
+      "context": "Chidi (m3) is a zero-risk liquidity anchor eligible for priority turn swaps if needed.",
       "cycle": 1,
       "memberId": "m3",
       "confirmationType": "wallet_signature_verified",
       "confirmedBy": "Signed by Amina Bello (0x679d547b18cf9f2e77f1d33f932cbf4de5c63dda6a5c5d0e44caf7ae4334cd1b)",
+      "auditStatus": "QUARANTINED_SYNTHETIC: Fictional member pattern; signed with ephemeral Ed25519 key unrelated to 0x679d54...cd1b.",
       "elapsedMs": 22656,
       "createdAt": "2026-11-03T12:35:58.394Z"
     },
@@ -67,10 +84,13 @@
       "category": "Reminder preferences",
       "memoryType": "reminder_preference",
       "title": "Folake Direct Notification Preference",
+      "quote": "Please send Folake a direct private reminder 48 hours before deadline instead of tagging her in the main group channel.",
+      "context": "Send private DM reminder to Folake (m6) 48h prior to windowEnd.",
       "cycle": 3,
       "memberId": "m6",
       "confirmationType": "wallet_signature_verified",
       "confirmedBy": "Signed by Amina Bello (0x679d547b18cf9f2e77f1d33f932cbf4de5c63dda6a5c5d0e44caf7ae4334cd1b)",
+      "auditStatus": "QUARANTINED_SYNTHETIC: Fictional reminder preference; signed with ephemeral Ed25519 key unrelated to 0x679d54...cd1b.",
       "elapsedMs": 22827,
       "createdAt": "2026-11-03T12:36:21.222Z"
     },
@@ -84,9 +104,12 @@
       "category": "Agreements",
       "memoryType": "agreement",
       "title": "Emergency Medical Rotation Swap Rule",
+      "quote": "Any member in good standing with zero unexcused late payments may request an emergency medical payout turn swap with mutual consent.",
+      "context": "Allow verified zero-risk members to swap payout rotation turns for documented emergencies.",
       "cycle": 1,
       "confirmationType": "wallet_signature_verified",
       "confirmedBy": "Signed by Amina Bello (0x679d547b18cf9f2e77f1d33f932cbf4de5c63dda6a5c5d0e44caf7ae4334cd1b)",
+      "auditStatus": "QUARANTINED_SYNTHETIC: Fictional agreement; signed with ephemeral Ed25519 key unrelated to 0x679d54...cd1b.",
       "elapsedMs": 22576,
       "createdAt": "2026-11-03T12:36:43.799Z"
     },
@@ -100,10 +123,13 @@
       "category": "Agreements",
       "memoryType": "agreement",
       "title": "Cycle 6 Turn Swap Between Zainab and Chidi",
+      "quote": "Zainab and Chidi agreed to swap Cycle 3 and Cycle 6 payout slots so Zainab could cover Q2 inventory.",
+      "context": "Record approved payout turn swap between Zainab (m4) and Chidi (m3).",
       "cycle": 5,
       "memberId": "m4",
       "confirmationType": "organizer_entered",
       "confirmedBy": "Organizer-entered record (Amina Bello · 0x679d547b18cf9f2e77f1d33f932cbf4de5c63dda6a5c5d0e44caf7ae4334cd1b)",
+      "auditStatus": "QUARANTINED_SYNTHETIC: Fictional sample-circle turn swap.",
       "elapsedMs": 22966,
       "createdAt": "2026-11-03T12:37:06.765Z"
     },
@@ -117,10 +143,13 @@
       "category": "Reminder preferences",
       "memoryType": "reminder_preference",
       "title": "Tunde Pre-Invoice Reminder Timing",
+      "quote": "Remind Tunde on the 28th of each month so he can initiate his contractor wire before the 1st.",
+      "context": "Schedule Tunde (m2) contribution reminder 3 days before cycle window opens.",
       "cycle": 4,
       "memberId": "m2",
       "confirmationType": "organizer_entered",
       "confirmedBy": "Organizer-entered record (Amina Bello · 0x679d547b18cf9f2e77f1d33f932cbf4de5c63dda6a5c5d0e44caf7ae4334cd1b)",
+      "auditStatus": "QUARANTINED_SYNTHETIC: Fictional sample-circle reminder preference.",
       "elapsedMs": 22734,
       "createdAt": "2026-11-03T12:37:29.499Z"
     },
@@ -134,10 +163,13 @@
       "category": "Member patterns",
       "memoryType": "member_pattern",
       "title": "Amina Organizer Day-1 Verification Pattern",
+      "quote": "Amina submits her contribution on Day 1 of every cycle and posts the Sui transaction digest for group verification.",
+      "context": "Amina (m1) verifies pool balance and posts opening digest on Day 1.",
       "cycle": 1,
       "memberId": "m1",
       "confirmationType": "organizer_entered",
       "confirmedBy": "Organizer-entered record (Amina Bello · 0x679d547b18cf9f2e77f1d33f932cbf4de5c63dda6a5c5d0e44caf7ae4334cd1b)",
+      "auditStatus": "QUARANTINED_SYNTHETIC: Fictional sample-circle member pattern.",
       "elapsedMs": 22561,
       "createdAt": "2026-11-03T12:37:52.060Z"
     },
@@ -151,9 +183,12 @@
       "category": "Agreements",
       "memoryType": "agreement",
       "title": "Strict Token Type Verification Policy",
+      "quote": "All contributions must be settled in the configured circle token; transfers in other coin types are flagged WrongToken and excluded from pot totals.",
+      "context": "Reject transfers whose coinType does not match the circle tokenType.",
       "cycle": 1,
       "confirmationType": "organizer_entered",
       "confirmedBy": "Organizer-entered record (Amina Bello · 0x679d547b18cf9f2e77f1d33f932cbf4de5c63dda6a5c5d0e44caf7ae4334cd1b)",
+      "auditStatus": "QUARANTINED_SYNTHETIC: Part of synthetic lagos-techies-seed-circle batch.",
       "elapsedMs": 21823,
       "createdAt": "2026-11-03T12:38:13.883Z"
     },
@@ -167,45 +202,15 @@
       "category": "Reminder preferences",
       "memoryType": "reminder_preference",
       "title": "Zainab Evening UTC Reminder Window",
+      "quote": "Zainab prefers payment reminders between 18:00 and 20:00 UTC after her retail shop closes.",
+      "context": "Deliver reminders to Zainab (m4) during 18:00-20:00 UTC window.",
       "cycle": 2,
       "memberId": "m4",
       "confirmationType": "organizer_entered",
       "confirmedBy": "Organizer-entered record (Amina Bello · 0x679d547b18cf9f2e77f1d33f932cbf4de5c63dda6a5c5d0e44caf7ae4334cd1b)",
+      "auditStatus": "QUARANTINED_SYNTHETIC: Fictional sample-circle reminder preference.",
       "elapsedMs": 23177,
       "createdAt": "2026-11-03T12:38:37.061Z"
     }
-  ],
-  "sampleRecallVerification": {
-    "query": "Can Tunde pay late this month grace period?",
-    "returnedCount": 5,
-    "topHits": [
-      {
-        "title": "Tunde 72-Hour Contractor Grace Window",
-        "walrusBlobId": "_jSFAxHds6FqS3kFOwsKN1M2iVSHbnVt_BX1_YGeQfc",
-        "distance": 0.4356367317796558,
-        "category": "Agreements"
-      },
-      {
-        "title": "Tunde Pre-Invoice Reminder Timing",
-        "walrusBlobId": "6BZtcqAEiGgHPtW1rqAgu11kuItlYI2_ohgCaC4MDcw",
-        "distance": 0.5325530225407811,
-        "category": "Reminder preferences"
-      },
-      {
-        "title": "Emeka Two-Tranche Split Contribution Pattern",
-        "walrusBlobId": "rPLnm650Px2cF9_l1UcK7zZZ7EjMLQlrTGEAZVILv0U",
-        "distance": 0.663900174636902,
-        "category": "Member patterns"
-      }
-    ]
-  },
-  "restoreVerification": {
-    "restored": 0,
-    "skipped": 10,
-    "failed": 0,
-    "total": 10,
-    "namespace": "ajo-circle:lagos-techies-seed-circle",
-    "owner": "0x679d547b18cf9f2e77f1d33f932cbf4de5c63dda6a5c5d0e44caf7ae4334cd1b",
-    "truncated": true
-  }
+  ]
 }

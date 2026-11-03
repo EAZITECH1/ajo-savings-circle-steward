@@ -5,7 +5,11 @@ loadDotEnvIfPresent()
 
 async function main() {
   requireIntegrationConfig('memwal')
-  const circleId = process.argv[2] || 'lagos-techies-seed-circle'
+  const circleId = (process.argv[2] || '').trim()
+  if (!circleId) {
+    console.error('Usage: node scripts/restore-from-walrus.mjs <circle-id> [limit]')
+    process.exit(1)
+  }
   const limit = Number(process.argv[3]) || 15
 
   console.log(`Restoring Walrus Memory vector index for circle "${circleId}" (limit=${limit})...`)

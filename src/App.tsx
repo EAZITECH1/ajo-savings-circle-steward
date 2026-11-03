@@ -31,9 +31,16 @@ import {
   ProposedMemory,
   WalrusRestoreOutcome,
 } from './services/types'
-import { WalrusMemoryStore } from './services/memoryStore'
+import { WalrusMemoryStore, ConfirmationChallengeResponse } from './services/memoryStore'
 import { SuiChainVerifier, ExtendedVerificationResult } from './services/chainVerifier'
 import { AjoSteward } from './services/steward'
+import {
+  WalletAuthChallenge,
+  requestWalletAuthChallenge,
+  submitWalletAuthSignature,
+  logoutWalletSession,
+  trySignWithInjectedSuiWallet,
+} from './services/walletAuth'
 
 const memoryStore = new WalrusMemoryStore()
 const chainVerifier = new SuiChainVerifier()
@@ -152,6 +159,17 @@ export default function App() {
 
   // Active proposed memory awaiting member confirmation
   const [proposedMemory, setProposedMemory] = useState<ProposedMemory | null>(null)
+  const [activeProposalChallenge, setActiveProposalChallenge] =
+    useState<ConfirmationChallengeResponse | null>(null)
+  const [proposalSignatureInput, setProposalSignatureInput] = useState<string>('')
+
+  // Wallet authentication state (required for protected server routes)
+  const [authenticatedWallet, setAuthenticatedWallet] = useState<string | null>(null)
+  const [walletAddressInput, setWalletAddressInput] = useState<string>('')
+  const [activeAuthChallenge, setActiveAuthChallenge] = useState<WalletAuthChallenge | null>(null)
+  const [walletSignatureInput, setWalletSignatureInput] = useState<string>('')
+  const [walletAuthError, setWalletAuthError] = useState<string | null>(null)
+  const [isWalletAuthBusy, setIsWalletAuthBusy] = useState<boolean>(false)
 
   // Payout recommendation state
   const [payoutRec, setPayoutRec] = useState<any>(null)
@@ -178,14 +196,18 @@ export default function App() {
     }
   }, [tokenType])
 
-  // Load any active circle registered on the server on boot
+  // Load any active circle registered on the server when authenticated
   useEffect(() => {
     refreshServiceStatuses()
-    fetch('/api/memory/circles')
-      .then((r) => r.json())
-      .then((data) => {
-        if (Array.isArray(data?.circles) && data.circles.length > 0) {
-          const latest = data.circles[data.circles.length - 1]
+  }, [refreshServiceStatuses])
+
+  useEffect(() => {
+    if (!authenticatedWallet) return
+    memoryStore
+      .listCircles()
+      .then((circles) => {
+        if (circles.length > 0) {
+          const latest = circles[circles.length - 1]
           setCircleId(latest.circleId)
           setLookupCircleSlug(latest.circleId)
           setCircleName(latest.circleName)
@@ -200,7 +222,7 @@ export default function App() {
         }
       })
       .catch(() => {})
-  }, [refreshServiceStatuses])
+  }, [authenticatedWallet])
 
   // Refresh memories from Walrus when circleId is active
   const refreshMemories = useCallback(async (targetCircleId?: string) => {
@@ -220,15 +242,15 @@ export default function App() {
   }, [circleId])
 
   useEffect(() => {
-    if (circleId && memwalHealth.configured) {
+    if (circleId && memwalHealth.configured && authenticatedWallet) {
       refreshMemories(circleId)
     }
-  }, [circleId, memwalHealth.configured, refreshMemories])
+  }, [circleId, memwalHealth.configured, authenticatedWallet, refreshMemories])
 
   // Re-evaluate group policy whenever `withMemory` or `memoriesList` changes,
   // preserving the underlying chain status (`Late` remains `Late` as a chain fact).
   useEffect(() => {
-    if (members.length === 0) return
+    if (members.length === 0 || !circleId || !authenticatedWallet) return
     let cancelled = false
     const updatePolicies = async () => {
       const updated = { ...verifications }
@@ -239,12 +261,12 @@ export default function App() {
         if (!existing) continue
         try {
           const policy = await chainVerifier.evaluatePolicy({
-            chainResult: existing,
+            circleId,
+            cycle: selectedCycle,
             withMemory,
             windowEnd,
-            memories: memoriesList,
             memberId: m.id,
-            memberName: m.name,
+            memberAddress: m.address,
           })
           updated[key] = { ...existing, policy }
           changed = true
@@ -260,7 +282,7 @@ export default function App() {
     return () => {
       cancelled = true
     }
-  }, [withMemory, memoriesList, selectedCycle, windowEnd])
+  }, [withMemory, memoriesList, selectedCycle, windowEnd, circleId, authenticatedWallet])
 
   // Load payout recommendations when Payout tab is opened
   useEffect(() => {
@@ -298,6 +320,173 @@ export default function App() {
     navigator.clipboard?.writeText(text)
     setCopiedText(id)
     setTimeout(() => setCopiedText(null), 2000)
+  }
+
+  // Request a single-use wallet authentication challenge from the server
+  const handleRequestWalletAuth = async () => {
+    const addr = walletAddressInput.trim()
+    if (!addr) {
+      setWalletAuthError('Enter your Sui wallet address (0x...) to request a login challenge.')
+      return
+    }
+    setIsWalletAuthBusy(true)
+    setWalletAuthError(null)
+    try {
+      const challenge = await requestWalletAuthChallenge(addr)
+      setActiveAuthChallenge(challenge)
+      const autoSigned = await trySignWithInjectedSuiWallet(challenge.message).catch(() => null)
+      if (autoSigned?.signature) {
+        const session = await submitWalletAuthSignature({
+          challengeId: challenge.challengeId,
+          address: challenge.address,
+          signature: autoSigned.signature,
+        })
+        setAuthenticatedWallet(session.walletAddress)
+        setActiveAuthChallenge(null)
+        setWalletSignatureInput('')
+      }
+    } catch (err: any) {
+      setWalletAuthError(err.message || 'Failed to issue wallet authentication challenge')
+    } finally {
+      setIsWalletAuthBusy(false)
+    }
+  }
+
+  // Submit a signed wallet challenge to authenticate the session
+  const handleVerifyWalletAuth = async () => {
+    if (!activeAuthChallenge || !walletSignatureInput.trim()) return
+    setIsWalletAuthBusy(true)
+    setWalletAuthError(null)
+    try {
+      const session = await submitWalletAuthSignature({
+        challengeId: activeAuthChallenge.challengeId,
+        address: activeAuthChallenge.address,
+        signature: walletSignatureInput.trim(),
+      })
+      setAuthenticatedWallet(session.walletAddress)
+      setActiveAuthChallenge(null)
+      setWalletSignatureInput('')
+    } catch (err: any) {
+      setWalletAuthError(err.message || 'Wallet signature verification failed')
+      setActiveAuthChallenge(null)
+    } finally {
+      setIsWalletAuthBusy(false)
+    }
+  }
+
+  const handleLogoutWallet = async () => {
+    await logoutWalletSession()
+    setAuthenticatedWallet(null)
+    setActiveAuthChallenge(null)
+    setWalletSignatureInput('')
+  }
+
+  // Request a proposal-bound confirmation challenge for member-signed confirmation
+  const handleIssueProposalChallenge = async (prop: ProposedMemory) => {
+    if (!circleId) {
+      setMemoryError('Activate or register a circle before confirming memories.')
+      return
+    }
+    const actorId = confirmingMemberId || members[0]?.id
+    setIsMemoryWriting(true)
+    setMemoryError(null)
+    try {
+      let proposalId = prop.id
+      if (!proposalId || !proposalId.startsWith('prop-')) {
+        const staged = await memoryStore.propose({
+          circleId,
+          category: prop.category,
+          title: prop.title,
+          quote: prop.quote,
+          suggestedAction: prop.suggestedAction || prop.title,
+          memberId: prop.memberId,
+          cycle: prop.cycle || selectedCycle,
+          txDigest: prop.txDigest,
+        })
+        setProposedMemory(staged)
+        proposalId = staged.id
+      }
+      const challenge = await memoryStore.requestConfirmationChallenge({
+        circleId,
+        proposalId,
+        memberId: actorId,
+      })
+      setActiveProposalChallenge(challenge)
+      const autoSigned = await trySignWithInjectedSuiWallet(challenge.message).catch(() => null)
+      if (autoSigned?.signature) {
+        setProposalSignatureInput(autoSigned.signature)
+      }
+    } catch (err: any) {
+      setMemoryError(err.message || 'Failed to issue proposal confirmation challenge')
+    } finally {
+      setIsMemoryWriting(false)
+    }
+  }
+
+  // Confirm proposed memory -> writes to Walrus Mainnet and waits for real blob_id
+  const handleConfirmMemory = async (
+    prop: ProposedMemory,
+    mode: 'wallet_signature_verified' | 'organizer_entered' = 'organizer_entered'
+  ) => {
+    if (!circleId) {
+      setMemoryError('Activate or register a circle before confirming memories.')
+      return
+    }
+    const actorId = confirmingMemberId || members[0]?.id
+    if (!actorId) {
+      setMemoryError('Add and register at least one circle member to authorize memory confirmation.')
+      return
+    }
+
+    setIsMemoryWriting(true)
+    setMemoryError(null)
+    try {
+      const newRecord = await memoryStore.confirmProposal({
+        circleId,
+        proposalId: activeProposalChallenge?.proposalId || prop.id,
+        proposal: {
+          ...prop,
+          circleId,
+          cycle: prop.cycle || selectedCycle,
+        },
+        memberId: actorId,
+        confirmationMode: mode,
+        challengeNonce:
+          mode === 'wallet_signature_verified' ? activeProposalChallenge?.nonce : undefined,
+        signature:
+          mode === 'wallet_signature_verified' ? proposalSignatureInput.trim() : undefined,
+      })
+
+      await refreshMemories(circleId)
+      setProposedMemory(null)
+      setActiveProposalChallenge(null)
+      setProposalSignatureInput('')
+
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: Date.now().toString(),
+          sender: 'steward',
+          text: `Saved to Walrus Mainnet (Blob ID: ${newRecord.walrusBlobId}): "${newRecord.title}" [${newRecord.confirmedBy}].`,
+          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+          citedMemories: [newRecord],
+        },
+      ])
+    } catch (err: any) {
+      setMemoryError(err.message || 'Failed to write memory to Walrus')
+      if (mode === 'wallet_signature_verified') {
+        setActiveProposalChallenge(null)
+      }
+    } finally {
+      setIsMemoryWriting(false)
+    }
+  }
+
+  // Reject proposed memory
+  const handleRejectMemory = () => {
+    setProposedMemory(null)
+    setActiveProposalChallenge(null)
+    setProposalSignatureInput('')
   }
 
   // Verify all members onchain
@@ -439,57 +628,6 @@ export default function App() {
     } finally {
       setIsChatTyping(false)
     }
-  }
-
-  // Confirm proposed memory -> writes to Walrus Mainnet and waits for real blob_id
-  const handleConfirmMemory = async (prop: ProposedMemory) => {
-    if (!circleId) {
-      setMemoryError('Activate or register a circle before confirming memories.')
-      return
-    }
-    const actorId = confirmingMemberId || members[0]?.id
-    if (!actorId) {
-      setMemoryError('Add and register at least one circle member to authorize memory confirmation.')
-      return
-    }
-
-    setIsMemoryWriting(true)
-    setMemoryError(null)
-    try {
-      const newRecord = await memoryStore.confirmProposal({
-        circleId,
-        proposalId: prop.id,
-        proposal: {
-          ...prop,
-          circleId,
-          cycle: prop.cycle || selectedCycle,
-        },
-        memberId: actorId,
-      })
-
-      await refreshMemories(circleId)
-      setProposedMemory(null)
-
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: Date.now().toString(),
-          sender: 'steward',
-          text: `Saved to Walrus Mainnet (Blob ID: ${newRecord.walrusBlobId}): "${newRecord.title}".`,
-          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-          citedMemories: [newRecord],
-        },
-      ])
-    } catch (err: any) {
-      setMemoryError(err.message || 'Failed to write memory to Walrus')
-    } finally {
-      setIsMemoryWriting(false)
-    }
-  }
-
-  // Reject proposed memory
-  const handleRejectMemory = () => {
-    setProposedMemory(null)
   }
 
   // Propose memory from the Memory tab
@@ -746,6 +884,98 @@ export default function App() {
               </p>
             </div>
           </div>
+
+          {/* Sui Wallet Authentication Bar (Required for server routes) */}
+          <div className="mt-md pt-md border-t border-secondary space-y-sm">
+            <div className="flex items-center justify-between gap-sm">
+              <span className="text-xs font-semibold text-secondary flex items-center gap-xs">
+                <Lock className="size-3.5 text-fg-brand-primary shrink-0" />
+                Wallet Authentication
+              </span>
+              {authenticatedWallet ? (
+                <div className="flex items-center gap-xs">
+                  <span className="inline-flex items-center gap-xs rounded-full border border-utility-success-200 bg-utility-success-50 px-md py-xxs text-xs font-mono text-utility-success-700">
+                    {authenticatedWallet.slice(0, 8)}...{authenticatedWallet.slice(-6)}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={handleLogoutWallet}
+                    className="text-xs text-tertiary hover:text-primary underline"
+                  >
+                    Sign out
+                  </button>
+                </div>
+              ) : (
+                <span className="text-xs text-tertiary">
+                  Sign challenge with your member Sui wallet to unlock circle routes
+                </span>
+              )}
+            </div>
+
+            {!authenticatedWallet && (
+              <div className="space-y-xs">
+                <div className="flex flex-col sm:flex-row gap-xs">
+                  <input
+                    type="text"
+                    value={walletAddressInput}
+                    onChange={(e) => setWalletAddressInput(e.target.value)}
+                    placeholder="Sui wallet address (0x...)"
+                    className="flex-1 rounded-md bg-primary px-md py-xs text-xs font-mono text-primary placeholder:text-placeholder border border-primary"
+                  />
+                  <button
+                    type="button"
+                    onClick={handleRequestWalletAuth}
+                    disabled={isWalletAuthBusy || !walletAddressInput.trim()}
+                    className="inline-flex items-center justify-center rounded-lg bg-brand-solid px-md py-xs text-xs font-semibold text-primary-on-brand shadow-xs disabled:opacity-50"
+                  >
+                    {isWalletAuthBusy ? 'Requesting...' : 'Sign / Request Challenge'}
+                  </button>
+                </div>
+
+                {activeAuthChallenge && (
+                  <div className="p-md rounded-lg bg-secondary border border-secondary space-y-xs text-xs">
+                    <div className="flex items-center justify-between">
+                      <span className="font-semibold text-primary">
+                        Sign this one-time challenge with wallet {activeAuthChallenge.address.slice(0, 10)}...:
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => handleCopy(activeAuthChallenge.message, 'auth-challenge')}
+                        className="text-brand-primary hover:underline flex items-center gap-xxs"
+                      >
+                        <Copy className="size-3" />
+                        <span>{copiedText === 'auth-challenge' ? 'Copied' : 'Copy challenge'}</span>
+                      </button>
+                    </div>
+                    <pre className="p-xs rounded bg-primary border border-secondary font-mono text-[11px] whitespace-pre-wrap text-secondary">
+                      {activeAuthChallenge.message}
+                    </pre>
+                    <div className="flex flex-col sm:flex-row gap-xs">
+                      <input
+                        type="text"
+                        value={walletSignatureInput}
+                        onChange={(e) => setWalletSignatureInput(e.target.value)}
+                        placeholder="Paste base64 Sui personal-message signature..."
+                        className="flex-1 rounded-md bg-primary px-md py-xs text-xs font-mono text-primary placeholder:text-placeholder border border-primary"
+                      />
+                      <button
+                        type="button"
+                        onClick={handleVerifyWalletAuth}
+                        disabled={isWalletAuthBusy || !walletSignatureInput.trim()}
+                        className="inline-flex items-center justify-center rounded-lg bg-brand-solid px-md py-xs text-xs font-semibold text-primary-on-brand shadow-xs disabled:opacity-50"
+                      >
+                        Verify Signature
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {walletAuthError && (
+                  <p className="text-xs text-error-primary">{walletAuthError}</p>
+                )}
+              </div>
+            )}
+          </div>
         </section>
 
         {/* SCREEN 1: HOME (CIRCLE DASHBOARD) */}
@@ -952,8 +1182,7 @@ export default function App() {
                         Contributions this cycle
                       </h3>
                       <p className="mt-xs text-sm text-tertiary">
-                        Submit a Sui transaction digest to verify via Tatum{' '}
-                        <code className="font-mono text-xs">sui_getTransactionBlock</code>
+                        Submit a Sui transaction digest to verify via Tatum Sui Gateway
                       </p>
                     </div>
                     <span className="inline-flex items-center gap-xs rounded-full border border-utility-gray-200 bg-utility-gray-50 px-md py-xxs text-xs font-medium text-utility-gray-700">
@@ -1632,21 +1861,70 @@ export default function App() {
                   </div>
                 )}
 
-                <div className="pt-xs flex items-center gap-sm">
+                {activeProposalChallenge && (
+                  <div className="p-sm rounded bg-primary border border-secondary space-y-xs text-xs">
+                    <p className="font-semibold text-primary">
+                      Proposal-bound challenge (Nonce: {activeProposalChallenge.nonce.slice(0, 8)}... · Hash:{' '}
+                      {activeProposalChallenge.proposalHash.slice(0, 10)}...)
+                    </p>
+                    <pre className="p-xs rounded bg-secondary font-mono text-[10px] whitespace-pre-wrap text-secondary">
+                      {activeProposalChallenge.message}
+                    </pre>
+                    <input
+                      type="text"
+                      value={proposalSignatureInput}
+                      onChange={(e) => setProposalSignatureInput(e.target.value)}
+                      placeholder="Paste base64 Sui personal-message signature for this proposal..."
+                      className="w-full rounded bg-primary px-sm py-xxs text-xs font-mono text-primary border border-primary"
+                    />
+                  </div>
+                )}
+
+                <div className="pt-xs flex flex-wrap items-center gap-sm">
+                  {!activeProposalChallenge ? (
+                    <button
+                      type="button"
+                      onClick={() => handleIssueProposalChallenge(proposedMemory)}
+                      disabled={isMemoryWriting || !memwalHealth.configured}
+                      className="inline-flex items-center gap-sm rounded-lg border border-transparent bg-brand-solid px-lg py-sm text-xs font-semibold text-primary-on-brand shadow-xs hover:bg-brand-solid-hover disabled:opacity-50"
+                    >
+                      <Lock className="size-3.5 text-fg-white shrink-0" />
+                      <span>Sign Proposal Challenge (Member-Signed)</span>
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() =>
+                        handleConfirmMemory(proposedMemory, 'wallet_signature_verified')
+                      }
+                      disabled={
+                        isMemoryWriting ||
+                        !memwalHealth.configured ||
+                        !proposalSignatureInput.trim()
+                      }
+                      className="inline-flex items-center gap-sm rounded-lg border border-transparent bg-brand-solid px-lg py-sm text-xs font-semibold text-primary-on-brand shadow-xs hover:bg-brand-solid-hover disabled:opacity-50"
+                    >
+                      <Check className="size-3.5 text-fg-white shrink-0" />
+                      <span>
+                        {isMemoryWriting
+                          ? 'Writing to Walrus Mainnet...'
+                          : 'Verify Member Signature & Write to Walrus'}
+                      </span>
+                    </button>
+                  )}
                   <button
-                    onClick={() => handleConfirmMemory(proposedMemory)}
+                    type="button"
+                    onClick={() => handleConfirmMemory(proposedMemory, 'organizer_entered')}
                     disabled={isMemoryWriting || !memwalHealth.configured}
-                    className="inline-flex items-center gap-sm rounded-lg border border-transparent bg-brand-solid px-lg py-sm text-sm font-semibold text-primary-on-brand shadow-xs hover:bg-brand-solid-hover disabled:opacity-50"
+                    className="inline-flex items-center gap-sm rounded-lg bg-primary px-md py-sm text-xs font-semibold text-secondary border border-primary shadow-xs hover:bg-primary-hover disabled:opacity-50"
+                    title="Organizer-entered record (distinct from member-signed confirmation)"
                   >
-                    <Check className="size-4 text-fg-white shrink-0" />
-                    <span>
-                      {isMemoryWriting ? 'Writing to Walrus Mainnet...' : 'Confirm & write to Walrus'}
-                    </span>
+                    <span>Record as Organizer-Entered (no member signature)</span>
                   </button>
                   <button
                     onClick={handleRejectMemory}
                     disabled={isMemoryWriting}
-                    className="inline-flex items-center gap-sm rounded-lg bg-primary px-lg py-sm text-sm font-semibold text-secondary border border-primary shadow-xs hover:bg-primary-hover"
+                    className="inline-flex items-center gap-sm rounded-lg bg-primary px-md py-sm text-xs font-semibold text-secondary border border-primary shadow-xs hover:bg-primary-hover"
                   >
                     Discard
                   </button>
@@ -1657,7 +1935,7 @@ export default function App() {
             <div className="px-lg py-sm border-t border-secondary bg-primary flex items-center gap-xs overflow-x-auto whitespace-nowrap">
               <span className="text-xs text-tertiary shrink-0">Ask:</span>
               {[
-                'Can Tunde pay late this month?',
+                'Is any late payment covered by a recorded grace rule?',
                 'Who has a split payment habit?',
                 'Who is the riskiest member before payout?',
               ].map((chip, idx) => (
@@ -1723,12 +2001,18 @@ export default function App() {
 
               {/* Rebuild / Restore Index from Walrus Controls */}
               <div className="pt-sm border-t border-secondary space-y-sm">
+                <p className="text-xs text-tertiary">
+                  Persistence note: Confirmed memories are stored on Walrus Mainnet. Circle rosters,
+                  wallet auth sessions, pending unconfirmed proposals, and submitted digest lists are
+                  held in server runtime memory only (per repository rules, no local database is
+                  used) and must be re-registered after a server restart.
+                </p>
                 <div className="flex flex-col sm:flex-row gap-sm">
                   <input
                     type="text"
                     value={lookupCircleSlug}
                     onChange={(e) => setLookupCircleSlug(e.target.value)}
-                    placeholder="Circle ID slug (e.g. lagos-techies-seed-circle)"
+                    placeholder="Enter registered Circle ID slug..."
                     className="flex-1 rounded-md bg-primary px-lg py-sm text-xs font-mono text-primary placeholder:text-placeholder border border-primary"
                   />
                   <button
@@ -1809,7 +2093,7 @@ export default function App() {
                 type="text"
                 value={manualTitle}
                 onChange={(e) => setManualTitle(e.target.value)}
-                placeholder="Memory title (e.g. Tunde 72-Hour Grace Rule)"
+                placeholder="Memory title (e.g. 72-Hour Contractor Grace Window)"
                 className="w-full rounded-md bg-primary px-lg py-sm text-xs text-primary placeholder:text-placeholder border border-primary"
               />
               <input
@@ -1858,19 +2142,45 @@ export default function App() {
                       </select>
                     </div>
                   )}
-                  <div className="flex gap-sm pt-xs">
+                  <div className="flex flex-wrap gap-sm pt-xs">
+                    {!activeProposalChallenge ? (
+                      <button
+                        type="button"
+                        onClick={() => handleIssueProposalChallenge(proposedMemory)}
+                        disabled={isMemoryWriting || !memwalHealth.configured}
+                        className="inline-flex items-center gap-xs rounded-lg bg-brand-solid px-lg py-sm text-xs font-semibold text-primary-on-brand shadow-xs disabled:opacity-50"
+                      >
+                        <Lock className="size-3.5 text-fg-white" />
+                        <span>Sign Proposal Challenge (Member-Signed)</span>
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          handleConfirmMemory(proposedMemory, 'wallet_signature_verified')
+                        }
+                        disabled={
+                          isMemoryWriting ||
+                          !memwalHealth.configured ||
+                          !proposalSignatureInput.trim()
+                        }
+                        className="inline-flex items-center gap-xs rounded-lg bg-brand-solid px-lg py-sm text-xs font-semibold text-primary-on-brand shadow-xs disabled:opacity-50"
+                      >
+                        <Check className="size-3.5 text-fg-white" />
+                        <span>
+                          {isMemoryWriting
+                            ? 'Writing to Walrus Mainnet...'
+                            : 'Verify Member Signature & Write to Walrus'}
+                        </span>
+                      </button>
+                    )}
                     <button
                       type="button"
-                      onClick={() => handleConfirmMemory(proposedMemory)}
+                      onClick={() => handleConfirmMemory(proposedMemory, 'organizer_entered')}
                       disabled={isMemoryWriting || !memwalHealth.configured}
-                      className="inline-flex items-center gap-xs rounded-lg bg-brand-solid px-lg py-sm text-xs font-semibold text-primary-on-brand shadow-xs disabled:opacity-50"
+                      className="inline-flex items-center gap-xs rounded-lg bg-primary px-md py-sm text-xs font-semibold text-secondary border border-primary disabled:opacity-50"
                     >
-                      <Check className="size-3.5 text-fg-white" />
-                      <span>
-                        {isMemoryWriting
-                          ? 'Writing to Walrus Mainnet...'
-                          : 'Confirm & write to Walrus'}
-                      </span>
+                      <span>Record as Organizer-Entered</span>
                     </button>
                     <button
                       type="button"

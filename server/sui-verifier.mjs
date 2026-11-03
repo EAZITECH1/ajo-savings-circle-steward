@@ -73,10 +73,14 @@ class RateLimitedRpcQueue {
 const rpcQueue = new RateLimitedRpcQueue()
 
 /**
- * Runtime store of member-submitted transaction digests per `(circleId, cycle, normalizedMemberAddress)`.
- * Allows two partial payment digests from the same member to be aggregated inside the partial window.
+ * Runtime store of member-submitted transaction digests and server-verified chain outcomes
+ * per `(circleId, cycle, normalizedMemberAddress)`.
+ * Allows two partial payment digests from the same member to be aggregated inside the partial window,
+ * and allows the Steward & policy evaluator to read server-verified chain facts without trusting
+ * client-supplied verification payloads.
  */
 const submittedDigestsStore = new Map()
+const serverVerifiedContributionsStore = new Map()
 
 export function recordSubmittedDigest(circleId, cycle, memberAddress, digest) {
   const key = `${circleId || 'default'}:${cycle}:${normalizeSuiAddress(memberAddress)}`
@@ -96,9 +100,24 @@ export function getSubmittedDigests(circleId, cycle, memberAddress) {
   return submittedDigestsStore.get(key) ? [...submittedDigestsStore.get(key)] : []
 }
 
+export function recordServerVerifiedContribution(circleId, cycle, memberAddress, result) {
+  const key = `${circleId || 'default'}:${cycle}:${normalizeSuiAddress(memberAddress)}`
+  serverVerifiedContributionsStore.set(key, {
+    ...result,
+    verifiedAtServerIso: new Date().toISOString(),
+  })
+  return serverVerifiedContributionsStore.get(key)
+}
+
+export function getServerVerifiedContribution(circleId, cycle, memberAddress) {
+  const key = `${circleId || 'default'}:${cycle}:${normalizeSuiAddress(memberAddress)}`
+  return serverVerifiedContributionsStore.get(key) || null
+}
+
 export function clearSubmittedDigests(circleId, cycle, memberAddress) {
   const key = `${circleId || 'default'}:${cycle}:${normalizeSuiAddress(memberAddress)}`
   submittedDigestsStore.delete(key)
+  serverVerifiedContributionsStore.delete(key)
 }
 
 /**
@@ -590,7 +609,9 @@ export async function verifyMemberContributionOnSui(params, options = {}) {
         memberId,
         memberName,
       })
-      return { ...unverified, network: tatumCfg?.SUI_NETWORK, policy }
+      const outcome = { ...unverified, network: tatumCfg?.SUI_NETWORK, policy }
+      recordServerVerifiedContribution(circleId, cycle, memberAddress, outcome)
+      return outcome
     }
 
     const pending = classifyChainContribution({
@@ -613,7 +634,9 @@ export async function verifyMemberContributionOnSui(params, options = {}) {
       memberId,
       memberName,
     })
-    return { ...pending, network: tatumCfg?.SUI_NETWORK, policy }
+    const outcome = { ...pending, network: tatumCfg?.SUI_NETWORK, policy }
+    recordServerVerifiedContribution(circleId, cycle, memberAddress, outcome)
+    return outcome
   }
 
   const allTransfers = []
@@ -641,12 +664,14 @@ export async function verifyMemberContributionOnSui(params, options = {}) {
         memberId,
         memberName,
       })
-      return {
+      const outcome = {
         ...failedResult,
         txDigest: d,
         network: tatumCfg?.SUI_NETWORK,
         policy,
       }
+      recordServerVerifiedContribution(circleId, cycle, memberAddress, outcome)
+      return outcome
     }
     allTransfers.push(...lookup.transfers)
   }
@@ -674,11 +699,13 @@ export async function verifyMemberContributionOnSui(params, options = {}) {
     memberName,
   })
 
-  return {
+  const outcome = {
     ...classified,
     network: tatumCfg?.SUI_NETWORK,
     policy,
   }
+  recordServerVerifiedContribution(circleId, cycle, memberAddress, outcome)
+  return outcome
 }
 
 /**

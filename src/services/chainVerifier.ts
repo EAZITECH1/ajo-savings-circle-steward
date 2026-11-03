@@ -5,6 +5,7 @@ import {
   PolicyEvaluation,
   MemoryRecord,
 } from './types'
+import { getAuthHeaders } from './walletAuth'
 
 export interface ExtendedVerificationParams extends VerificationParams {
   circleId?: string
@@ -19,21 +20,37 @@ export interface ExtendedVerificationResult extends VerificationResult {
 }
 
 /**
- * SuiChainVerifier connects to Tatum's Sui RPC gateway via the backend
- * `/api/tatum/sui/verify-contribution` route using official `sui_getTransactionBlock` lookups.
+ * SuiChainVerifier connects to Tatum's Sui Gateway via the backend
+ * `/api/tatum/sui/verify-contribution` route.
  *
  * Rules:
  * - Never marks a payment as paid without a matching on-chain transaction.
  * - Keeps chain facts (`Verified`, `Late`, `Partial`, `WrongToken`, `WrongAmount`, `Pending`, `Unverified`)
  *   strictly separate from group policy (`policy.policyStatus`).
+ * - The server verifies transactions and recalls Walrus memories itself; client-supplied
+ *   memories or chain results are never trusted by the server.
  */
 export class SuiChainVerifier implements ChainVerifier {
   async verifyContribution(params: ExtendedVerificationParams): Promise<ExtendedVerificationResult> {
     try {
       const response = await fetch('/api/tatum/sui/verify-contribution', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(params),
+        headers: getAuthHeaders(),
+        body: JSON.stringify({
+          circleId: params.circleId,
+          poolAddress: params.poolAddress,
+          memberAddress: params.memberAddress,
+          memberId: params.memberId,
+          memberName: params.memberName,
+          token: params.token,
+          expectedAmount: params.expectedAmount,
+          windowStart: params.windowStart,
+          windowEnd: params.windowEnd,
+          cycle: params.cycle,
+          txDigest: params.txDigest,
+          txDigests: params.txDigests,
+          withMemory: params.withMemory,
+        }),
       })
 
       if (!response.ok) {
@@ -41,9 +58,9 @@ export class SuiChainVerifier implements ChainVerifier {
         return {
           status: 'Unverified',
           code: 'unverified',
-          error: errJson.error || `HTTP ${response.status}: Failed to reach Sui RPC gateway`,
+          error: errJson.error || `HTTP ${response.status}: Failed to reach Sui gateway`,
           amountReceived: 0,
-          rawNotes: 'Could not connect to chain verification backend.',
+          rawNotes: errJson.error || 'Could not verify contribution on server.',
         }
       }
 
@@ -60,16 +77,16 @@ export class SuiChainVerifier implements ChainVerifier {
   }
 
   async evaluatePolicy(params: {
-    chainResult: VerificationResult
+    circleId: string
+    cycle: number
     withMemory: boolean
     windowEnd: string
-    memories: MemoryRecord[]
     memberId?: string
-    memberName?: string
+    memberAddress?: string
   }): Promise<PolicyEvaluation> {
     const res = await fetch('/api/tatum/sui/evaluate-policy', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: getAuthHeaders(),
       body: JSON.stringify(params),
     })
     const data = await res.json()
@@ -82,7 +99,7 @@ export class SuiChainVerifier implements ChainVerifier {
   async clearMemberDigests(circleId: string, cycle: number, memberAddress: string): Promise<void> {
     await fetch('/api/tatum/sui/clear-digests', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: getAuthHeaders(),
       body: JSON.stringify({ circleId, cycle, memberAddress }),
     })
   }

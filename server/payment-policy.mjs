@@ -9,6 +9,59 @@
  */
 
 /**
+ * Quarantined synthetic Walrus Mainnet records written by an earlier seed script
+ * (`namespace: ajo-circle:lagos-techies-seed-circle`).
+ * These contain fictional sample-circle history and synthetic confirmation claims,
+ * and MUST NEVER be presented as real group history, consensus, or member preferences,
+ * nor influence policy outcomes, payout recommendations, or Steward LLM answers.
+ */
+export const QUARANTINED_SYNTHETIC_CIRCLES = new Set([
+  'lagos-techies-seed-circle',
+  'ajo-circle:lagos-techies-seed-circle',
+])
+
+export const QUARANTINED_SYNTHETIC_BLOB_IDS = new Set([
+  '_jSFAxHds6FqS3kFOwsKN1M2iVSHbnVt_BX1_YGeQfc',
+  'rPLnm650Px2cF9_l1UcK7zZZ7EjMLQlrTGEAZVILv0U',
+  'kmgKVSUM4PiTy1bJYHSAr3iVrspUvbvYVd_jhu3UWAU',
+  'FYt7CvCY5YeKpVO7e1LDGwWNI-Bnb01PbJo2qm1_tKU',
+  'cq4PFpzCxmWyXhQN7JkRRG6inU0KxvuzOBTaGDwySS8',
+  'QAoLGVx0ytBi5SczS6k8xBxO2_WkWk4WnpPmwpDa8bM',
+  '6BZtcqAEiGgHPtW1rqAgu11kuItlYI2_ohgCaC4MDcw',
+  'DJGI6m-_PMB_tR2zNfywaurBkPEum8Phkde6fNFJE4Y',
+  'ZqKcldiC6o3gxTR7GhuXeQ4UP1v9Vs85AskJbKpZiBM',
+  'AlrI6_KXE6dyYRvQ0oqLuYvJFk70xnzN5L_MeRX598A',
+])
+
+/**
+ * Return true if a memory record or circleId belongs to the quarantined synthetic dataset.
+ * @param {any} item
+ */
+export function isQuarantinedSyntheticRecord(item) {
+  if (!item) return false
+  if (typeof item === 'string') {
+    const trimmed = item.trim()
+    return (
+      QUARANTINED_SYNTHETIC_BLOB_IDS.has(trimmed) ||
+      QUARANTINED_SYNTHETIC_CIRCLES.has(trimmed.toLowerCase())
+    )
+  }
+  const blobId = item.walrusBlobId || item.blob_id
+  if (blobId && QUARANTINED_SYNTHETIC_BLOB_IDS.has(String(blobId).trim())) {
+    return true
+  }
+  const circleId = String(item.circleId || item.namespace || '').trim().toLowerCase()
+  if (
+    circleId &&
+    (QUARANTINED_SYNTHETIC_CIRCLES.has(circleId) ||
+      circleId.endsWith(':lagos-techies-seed-circle'))
+  ) {
+    return true
+  }
+  return false
+}
+
+/**
  * Normalize a Sui address or Move coin type for case-insensitive hex comparison.
  * Pad 0x-prefixed hex addresses to 64 hex chars when comparing addresses.
  * @param {string} address
@@ -338,9 +391,10 @@ export function evaluateContributionPolicy(chainResult, options) {
   const chainStatus = chainResult.status
   const windowEndMs = typeof windowEnd === 'number' ? windowEnd : Date.parse(windowEnd)
 
-  // Helper to match memories relevant to this member
+  // Helper to match memories relevant to this member (excluding any quarantined synthetic blobs)
   const memberMemories = withMemory
     ? memories.filter((m) => {
+        if (isQuarantinedSyntheticRecord(m)) return false
         if (memberId && m.memberId === memberId) return true
         if (memberName) {
           const firstName = memberName.split(' ')[0].toLowerCase()
