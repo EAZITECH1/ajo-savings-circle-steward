@@ -13,6 +13,7 @@ import react from '@vitejs/plugin-react'
 import { fileURLToPath } from 'url'
 import path from 'path'
 import tatumRoutes from './routes/tatum.mjs'
+import memoryRoutes from './routes/memory.mjs'
 import { credentialGuard } from './credential-guard.mjs'
 import { loadDotEnvIfPresent, loadConfig } from './config.mjs'
 
@@ -69,6 +70,7 @@ app.get('/api/config/status', (_req, res) => {
 })
 
 app.use('/api/tatum', tatumRoutes)
+app.use('/api/memory', memoryRoutes)
 
 const server = createHttpServer(app)
 
