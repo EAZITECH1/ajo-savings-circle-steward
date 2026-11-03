@@ -163,6 +163,29 @@ test('Route Authorization: blocks unauthenticated requests (401) and non-member 
       false
     )
     assert.equal(addrOutsider !== addr1, true)
+
+    // 6. Duplicate member ID or duplicate wallet address in circle roster is rejected with 409
+    const dupWalletRes = await fetch(`${baseUrl}/api/memory/circles`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${sessionMember1.token}`,
+      },
+      body: JSON.stringify({
+        circleId: 'dup-wallet-circle',
+        circleName: 'Dup Wallet Circle',
+        poolAddress: '0x978095921852e2fe53ea7fae4f69f2c7285e365d07450cace661c3553c3c4b33',
+        contributionPerMember: 1,
+        tokenType: '0x2::sui::SUI',
+        cycleLength: 'Monthly',
+        currentCycle: 1,
+        members: [
+          { id: 'm1', name: 'Organizer One', address: addr1 },
+          { id: 'm2', name: 'Duplicate Wallet', address: addr1 },
+        ],
+      }),
+    })
+    assert.equal(dupWalletRes.status, 409)
   } finally {
     await new Promise((resolve) => server.close(resolve))
   }

@@ -11,8 +11,6 @@ const router = Router()
 
 function mapStewardErrorStatus(err) {
   if (err instanceof WalletAuthError) return err.statusCode
-  if (err?.name === 'StorageUnavailableError') return 503
-  if (err?.name === 'StorageConflictError') return 409
   if (err?.name === 'ConfigValidationError') return 503
   if (err?.message?.includes('Authorization failed')) return 403
   if (err?.message?.includes('not registered')) return 404

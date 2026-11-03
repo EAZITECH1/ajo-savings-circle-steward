@@ -5,11 +5,15 @@ import {
   evaluateContributionPolicy,
   normalizeSuiAddress,
 } from './payment-policy.mjs'
-import {
-  getDatabase,
-  withTransaction,
-  StorageConflictError,
-} from './db.mjs'
+
+export class TransactionConflictError extends Error {
+  constructor(message, statusCode = 409) {
+    super(message)
+    this.name = 'TransactionConflictError'
+    this.statusCode = statusCode
+    this.code = 'TRANSACTION_CONFLICT'
+  }
+}
 
 /**
  * Validate a Sui transaction digest (Base58-encoded 32-byte digest, typically 43-44 chars).
@@ -78,13 +82,24 @@ class RateLimitedRpcQueue {
 const rpcQueue = new RateLimitedRpcQueue()
 
 /**
- * Durable SQLite store of member-submitted transaction digests and server-verified chain outcomes
- * per `(circleId, cycle, normalizedMemberAddress)`.
- * Enforces `PRIMARY KEY (tx_digest, network)` on `submitted_transactions` so the same transaction
- * digest cannot be claimed across conflicting members, circles, or cycles.
+ * In-memory stores of member-submitted transaction digests and server-verified chain outcomes
+ * per `(circleId, cycle, normalizedMemberAddress)` and `(txDigest, network)`.
+ * Enforces unique `(txDigest, network)` claims so the same transaction digest cannot be claimed
+ * across conflicting members, circles, or cycles.
  */
+const submittedTransactionsStore = new Map()
+const submittedDigestsStore = new Map()
+const serverVerifiedContributionsStore = new Map()
+
+function makeDigestKey(circleId, cycle, memberAddress) {
+  return `${String(circleId || 'default').trim()}:${Number(cycle) || 1}:${normalizeSuiAddress(memberAddress)}`
+}
+
+function makeTxNetworkKey(txDigest, network) {
+  return `${String(txDigest || '').trim()}:${String(network || 'testnet').trim()}`
+}
+
 export function recordSubmittedDigest(circleId, cycle, memberAddress, digest, options = {}) {
-  const db = getDatabase()
   const normCircleId = String(circleId || 'default').trim()
   const normCycle = Number(cycle) || 1
   const normMember = normalizeSuiAddress(memberAddress)
@@ -93,94 +108,59 @@ export function recordSubmittedDigest(circleId, cycle, memberAddress, digest, op
   const poolAddress = String(options.poolAddress || '').trim()
   const memberId = options.memberId ? String(options.memberId).trim() : null
 
-  return withTransaction(db, () => {
-    const existing = db
-      .prepare('SELECT * FROM submitted_transactions WHERE tx_digest = ? AND network = ?')
-      .get(trimmedDigest, network)
+  const txKey = makeTxNetworkKey(trimmedDigest, network)
+  const existing = submittedTransactionsStore.get(txKey)
 
-    if (
-      existing &&
-      (existing.circle_id !== normCircleId ||
-        Number(existing.cycle) !== normCycle ||
-        existing.normalized_member_address !== normMember)
-    ) {
-      throw new StorageConflictError(
-        `Conflicting transaction submission: digest "${trimmedDigest}" on Sui ${network} is already claimed for circle "${existing.circle_id}", cycle ${existing.cycle}, member ${existing.normalized_member_address}.`,
-        409
-      )
-    }
+  if (
+    existing &&
+    (existing.circleId !== normCircleId ||
+      Number(existing.cycle) !== normCycle ||
+      existing.normalizedMemberAddress !== normMember)
+  ) {
+    throw new TransactionConflictError(
+      `Conflicting transaction submission: digest "${trimmedDigest}" on Sui ${network} is already claimed for circle "${existing.circleId}", cycle ${existing.cycle}, member ${existing.normalizedMemberAddress}.`,
+      409
+    )
+  }
 
-    if (!existing) {
-      db.prepare(`
-        INSERT INTO submitted_transactions (
-          tx_digest, network, circle_id, cycle, member_id,
-          normalized_member_address, expected_pool_address,
-          execution_status, verified_at_iso
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'unverified_claim', ?)
-      `).run(
-        trimmedDigest,
-        network,
-        normCircleId,
-        normCycle,
-        memberId,
-        normMember,
-        poolAddress,
-        new Date().toISOString()
-      )
-    }
+  if (!existing) {
+    submittedTransactionsStore.set(txKey, {
+      txDigest: trimmedDigest,
+      network,
+      circleId: normCircleId,
+      cycle: normCycle,
+      memberId: memberId || undefined,
+      normalizedMemberAddress: normMember,
+      expectedPoolAddress: poolAddress,
+      observedSender: null,
+      observedRecipient: null,
+      tokenType: null,
+      amount: null,
+      executionStatus: 'unverified_claim',
+      txTimestampMs: null,
+      txTimestampIso: null,
+      verifiedAtIso: new Date().toISOString(),
+    })
+  }
 
-    const rows = db
-      .prepare(
-        `SELECT tx_digest FROM submitted_transactions
-         WHERE circle_id = ? AND cycle = ? AND normalized_member_address = ?
-         ORDER BY rowid ASC`
-      )
-      .all(normCircleId, normCycle, normMember)
-    return rows.map((r) => r.tx_digest)
-  })
+  const key = makeDigestKey(normCircleId, normCycle, normMember)
+  const list = submittedDigestsStore.get(key) || []
+  if (trimmedDigest && !list.includes(trimmedDigest)) {
+    list.push(trimmedDigest)
+    submittedDigestsStore.set(key, list)
+  }
+  return [...list]
 }
 
 export function getSubmittedDigests(circleId, cycle, memberAddress) {
-  const db = getDatabase()
-  const normCircleId = String(circleId || 'default').trim()
-  const normCycle = Number(cycle) || 1
-  const normMember = normalizeSuiAddress(memberAddress)
-  const rows = db
-    .prepare(
-      `SELECT tx_digest FROM submitted_transactions
-       WHERE circle_id = ? AND cycle = ? AND normalized_member_address = ?
-       ORDER BY rowid ASC`
-    )
-    .all(normCircleId, normCycle, normMember)
-  return rows.map((r) => r.tx_digest)
+  const key = makeDigestKey(circleId, cycle, memberAddress)
+  return [...(submittedDigestsStore.get(key) || [])]
 }
 
 export function getPersistedSubmittedTransaction(txDigest, network = process.env.SUI_NETWORK || 'testnet') {
-  const db = getDatabase()
-  const row = db
-    .prepare('SELECT * FROM submitted_transactions WHERE tx_digest = ? AND network = ?')
-    .get(String(txDigest || '').trim(), String(network || 'testnet').trim())
-  if (!row) return null
-  return {
-    txDigest: row.tx_digest,
-    network: row.network,
-    circleId: row.circle_id,
-    cycle: Number(row.cycle),
-    memberId: row.member_id || undefined,
-    normalizedMemberAddress: row.normalized_member_address,
-    expectedPoolAddress: row.expected_pool_address,
-    observedSender: row.observed_sender || null,
-    observedRecipient: row.observed_recipient || null,
-    tokenType: row.token_type || null,
-    amount: row.amount !== null && row.amount !== undefined ? Number(row.amount) : null,
-    executionStatus: row.execution_status,
-    txTimestampMs:
-      row.tx_timestamp_ms !== null && row.tx_timestamp_ms !== undefined
-        ? Number(row.tx_timestamp_ms)
-        : null,
-    txTimestampIso: row.tx_timestamp_iso || null,
-    verifiedAtIso: row.verified_at_iso,
-  }
+  const txKey = makeTxNetworkKey(txDigest, network)
+  const row = submittedTransactionsStore.get(txKey)
+  return row ? { ...row } : null
 }
 
 export function recordServerVerifiedContribution(
@@ -190,7 +170,6 @@ export function recordServerVerifiedContribution(
   result,
   observedTransfers = []
 ) {
-  const db = getDatabase()
   const normCircleId = String(circleId || 'default').trim()
   const normCycle = Number(cycle) || 1
   const normMember = normalizeSuiAddress(memberAddress)
@@ -215,185 +194,84 @@ export function recordServerVerifiedContribution(
       ? 'success'
       : 'unverified')
 
-  withTransaction(db, () => {
-    // Update authoritative chain evidence for each verified transaction digest
-    for (const t of observedTransfers) {
-      if (!t.txDigest) continue
-      const existing = db
-        .prepare('SELECT * FROM submitted_transactions WHERE tx_digest = ? AND network = ?')
-        .get(t.txDigest, network)
+  for (const t of observedTransfers) {
+    if (!t.txDigest) continue
+    const txKey = makeTxNetworkKey(t.txDigest, network)
+    const existing = submittedTransactionsStore.get(txKey)
 
-      if (
-        existing &&
-        (existing.circle_id !== normCircleId ||
-          Number(existing.cycle) !== normCycle ||
-          existing.normalized_member_address !== normMember)
-      ) {
-        throw new StorageConflictError(
-          `Conflicting transaction submission: digest "${t.txDigest}" on Sui ${network} is already claimed for circle "${existing.circle_id}", cycle ${existing.cycle}, member ${existing.normalized_member_address}.`,
-          409
-        )
-      }
-
-      const txIso = Number.isFinite(t.timestampMs) ? new Date(t.timestampMs).toISOString() : null
-      const txStatus = t.executionSuccess === false ? 'failure' : 'success'
-
-      db.prepare(`
-        INSERT INTO submitted_transactions (
-          tx_digest, network, circle_id, cycle, member_id,
-          normalized_member_address, expected_pool_address,
-          observed_sender, observed_recipient, token_type, amount,
-          execution_status, tx_timestamp_ms, tx_timestamp_iso, verified_at_iso
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(tx_digest, network) DO UPDATE SET
-          observed_sender = excluded.observed_sender,
-          observed_recipient = excluded.observed_recipient,
-          token_type = excluded.token_type,
-          amount = excluded.amount,
-          execution_status = excluded.execution_status,
-          tx_timestamp_ms = excluded.tx_timestamp_ms,
-          tx_timestamp_iso = excluded.tx_timestamp_iso,
-          verified_at_iso = excluded.verified_at_iso
-      `).run(
-        t.txDigest,
-        network,
-        normCircleId,
-        normCycle,
-        result.memberId ?? null,
-        normMember,
-        result.expectedPoolAddress || '',
-        t.sender || null,
-        t.recipient || null,
-        t.tokenType || null,
-        typeof t.amount === 'number' ? t.amount : 0,
-        txStatus,
-        Number.isFinite(t.timestampMs) ? t.timestampMs : null,
-        txIso,
-        verifiedAtIso
+    if (
+      existing &&
+      (existing.circleId !== normCircleId ||
+        Number(existing.cycle) !== normCycle ||
+        existing.normalizedMemberAddress !== normMember)
+    ) {
+      throw new TransactionConflictError(
+        `Conflicting transaction submission: digest "${t.txDigest}" on Sui ${network} is already claimed for circle "${existing.circleId}", cycle ${existing.cycle}, member ${existing.normalizedMemberAddress}.`,
+        409
       )
     }
 
-    db.prepare(`
-      INSERT INTO member_cycle_verifications (
-        circle_id, cycle, normalized_member_address, member_id, network,
-        status, code, tx_digest, tx_digests_json,
-        observed_sender, observed_recipient, token_received, amount_received,
-        execution_status, tx_timestamp_iso, hours_late, error, raw_notes,
-        policy_json, verified_at_iso
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(circle_id, cycle, normalized_member_address) DO UPDATE SET
-        member_id = excluded.member_id,
-        network = excluded.network,
-        status = excluded.status,
-        code = excluded.code,
-        tx_digest = excluded.tx_digest,
-        tx_digests_json = excluded.tx_digests_json,
-        observed_sender = excluded.observed_sender,
-        observed_recipient = excluded.observed_recipient,
-        token_received = excluded.token_received,
-        amount_received = excluded.amount_received,
-        execution_status = excluded.execution_status,
-        tx_timestamp_iso = excluded.tx_timestamp_iso,
-        hours_late = excluded.hours_late,
-        error = excluded.error,
-        raw_notes = excluded.raw_notes,
-        policy_json = excluded.policy_json,
-        verified_at_iso = excluded.verified_at_iso
-    `).run(
-      normCircleId,
-      normCycle,
-      normMember,
-      result.memberId ?? null,
-      network,
-      result.status,
-      result.code || result.status.toLowerCase(),
-      result.txDigest ?? null,
-      JSON.stringify(digestsList),
-      observedSender,
-      observedRecipient,
-      result.tokenReceived ?? null,
-      Number(result.amountReceived) || 0,
-      executionStatus,
-      result.timestamp ?? null,
-      result.hoursLate !== undefined ? Number(result.hoursLate) : null,
-      result.error ?? null,
-      result.rawNotes ?? null,
-      result.policy ? JSON.stringify(result.policy) : null,
-      verifiedAtIso
-    )
-  })
+    const txIso = Number.isFinite(t.timestampMs) ? new Date(t.timestampMs).toISOString() : null
+    const txStatus = t.executionSuccess === false ? 'failure' : 'success'
 
-  return {
+    submittedTransactionsStore.set(txKey, {
+      txDigest: t.txDigest,
+      network,
+      circleId: normCircleId,
+      cycle: normCycle,
+      memberId: result.memberId ?? existing?.memberId,
+      normalizedMemberAddress: normMember,
+      expectedPoolAddress: result.expectedPoolAddress || existing?.expectedPoolAddress || '',
+      observedSender: t.sender || null,
+      observedRecipient: t.recipient || null,
+      tokenType: t.tokenType || null,
+      amount: typeof t.amount === 'number' ? t.amount : 0,
+      executionStatus: txStatus,
+      txTimestampMs: Number.isFinite(t.timestampMs) ? t.timestampMs : null,
+      txTimestampIso: txIso,
+      verifiedAtIso,
+    })
+  }
+
+  const key = makeDigestKey(normCircleId, normCycle, normMember)
+  const record = {
     ...result,
+    network,
+    txDigests: digestsList,
     observedSender,
     observedRecipient,
     executionStatus,
     verifiedAtServerIso: verifiedAtIso,
   }
+  serverVerifiedContributionsStore.set(key, record)
+  return record
 }
 
 export function getServerVerifiedContribution(circleId, cycle, memberAddress) {
-  const db = getDatabase()
-  const normCircleId = String(circleId || 'default').trim()
-  const normCycle = Number(cycle) || 1
-  const normMember = normalizeSuiAddress(memberAddress)
-  const row = db
-    .prepare(
-      `SELECT * FROM member_cycle_verifications
-       WHERE circle_id = ? AND cycle = ? AND normalized_member_address = ?`
-    )
-    .get(normCircleId, normCycle, normMember)
-  if (!row) return null
-
-  let txDigests = []
-  try {
-    txDigests = JSON.parse(row.tx_digests_json || '[]')
-  } catch {
-    txDigests = row.tx_digest ? [row.tx_digest] : []
-  }
-
-  let policy = undefined
-  if (row.policy_json) {
-    try {
-      policy = JSON.parse(row.policy_json)
-    } catch {
-      policy = undefined
-    }
-  }
-
-  return {
-    status: row.status,
-    code: row.code,
-    network: row.network,
-    txDigest: row.tx_digest || undefined,
-    txDigests,
-    observedSender: row.observed_sender || undefined,
-    observedRecipient: row.observed_recipient || undefined,
-    tokenReceived: row.token_received || undefined,
-    amountReceived: Number(row.amount_received) || 0,
-    executionStatus: row.execution_status,
-    timestamp: row.tx_timestamp_iso || undefined,
-    hoursLate: row.hours_late !== null && row.hours_late !== undefined ? Number(row.hours_late) : undefined,
-    error: row.error || undefined,
-    rawNotes: row.raw_notes || undefined,
-    policy,
-    verifiedAtServerIso: row.verified_at_iso,
-  }
+  const key = makeDigestKey(circleId, cycle, memberAddress)
+  return serverVerifiedContributionsStore.get(key) || null
 }
 
 export function clearSubmittedDigests(circleId, cycle, memberAddress) {
-  const db = getDatabase()
   const normCircleId = String(circleId || 'default').trim()
   const normCycle = Number(cycle) || 1
   const normMember = normalizeSuiAddress(memberAddress)
-  withTransaction(db, () => {
-    db.prepare(
-      'DELETE FROM submitted_transactions WHERE circle_id = ? AND cycle = ? AND normalized_member_address = ?'
-    ).run(normCircleId, normCycle, normMember)
-    db.prepare(
-      'DELETE FROM member_cycle_verifications WHERE circle_id = ? AND cycle = ? AND normalized_member_address = ?'
-    ).run(normCircleId, normCycle, normMember)
-  })
+  const key = makeDigestKey(normCircleId, normCycle, normMember)
+  const digests = submittedDigestsStore.get(key) || []
+  for (const d of digests) {
+    for (const [txKey, entry] of submittedTransactionsStore.entries()) {
+      if (
+        entry.txDigest === d &&
+        entry.circleId === normCircleId &&
+        Number(entry.cycle) === normCycle &&
+        entry.normalizedMemberAddress === normMember
+      ) {
+        submittedTransactionsStore.delete(txKey)
+      }
+    }
+  }
+  submittedDigestsStore.delete(key)
+  serverVerifiedContributionsStore.delete(key)
 }
 
 /**
@@ -874,7 +752,7 @@ export async function verifyMemberContributionOnSui(params, options = {}) {
       ...unverified,
       txDigest: digestHint || txDigest || undefined,
       network: tatumCfg?.SUI_NETWORK || 'testnet',
-      conflict: err instanceof StorageConflictError ? true : undefined,
+      conflict: err instanceof TransactionConflictError ? true : undefined,
       policy,
     }
   }

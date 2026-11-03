@@ -12,8 +12,6 @@ const router = Router()
 
 function mapAuthRouteStatus(err, fallback = 400) {
   if (err instanceof WalletAuthError) return err.statusCode
-  if (err?.name === 'StorageUnavailableError') return 503
-  if (err?.name === 'StorageConflictError') return 409
   return fallback
 }
 

@@ -18,7 +18,6 @@ import memoryRoutes from './routes/memory.mjs'
 import stewardRoutes from './routes/steward.mjs'
 import { credentialGuard } from './credential-guard.mjs'
 import { loadDotEnvIfPresent, loadConfig } from './config.mjs'
-import { initDatabase, getDatabaseStatus } from './db.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const root = path.join(__dirname, '..')
@@ -30,9 +29,8 @@ const root = path.join(__dirname, '..')
 process.chdir(root)
 loadDotEnvIfPresent(path.join(root, '.env'))
 
-// Validate tunable configuration at startup and initialize durable SQLite storage.
+// Validate tunable configuration at startup (fails fast if numeric tunables are malformed).
 const bootConfig = loadConfig()
-initDatabase(bootConfig.tunables.sqliteDbPath)
 
 const app = express()
 app.use(express.json())
@@ -45,7 +43,6 @@ app.get('/api/config/status', (_req, res) => {
   const current = loadConfig()
   res.json({
     tunables: current.tunables,
-    storage: getDatabaseStatus(),
     integrations: {
       tatum: {
         configured: current.integrations.tatum.configured,

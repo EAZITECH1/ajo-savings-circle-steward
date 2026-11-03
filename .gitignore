@@ -8,11 +8,6 @@ dist/
 !.env.example
 *.keystore.json
 .keystore/
-.data/
-*.sqlite
-*.sqlite-shm
-*.sqlite-wal
-*.db
 # Platform markers and harness internals — not the user's source. (The bridge's
 # file routes hide every dotfile, these included.)
 # .claude/ and .mcp.json are deliberately NOT listed: they carry the Tatum skills

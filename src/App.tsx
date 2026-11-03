@@ -2002,9 +2002,11 @@ export default function App() {
               {/* Rebuild / Restore Index from Walrus Controls */}
               <div className="pt-sm border-t border-secondary space-y-sm">
                 <p className="text-xs text-tertiary">
-                  Persistence note: Confirmed memories are stored on Walrus Mainnet. Circle rosters,
-                  proposals, hashed wallet sessions, and Tatum-verified transaction records are
-                  persisted in the server SQLite database across restarts.
+                  Persistence note: Confirmed group memories are persisted on Walrus Mainnet and can
+                  be restored below via semantic recall. In compliance with the preview container
+                  constraints (no runtime database or disk writes), active circle rosters, wallet
+                  sessions, and pending proposals live in server memory; payment evidence is verified
+                  live against Sui via Tatum.
                 </p>
                 <div className="flex flex-col sm:flex-row gap-sm">
                   <input

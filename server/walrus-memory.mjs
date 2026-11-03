@@ -8,12 +8,6 @@ import {
   isQuarantinedSyntheticRecord,
 } from './payment-policy.mjs'
 import { verifySuiAddressSignature, WalletAuthError } from './wallet-auth.mjs'
-import {
-  getDatabase,
-  withTransaction,
-  isRecordQuarantinedInDb,
-  StorageConflictError,
-} from './db.mjs'
 
 export {
   QUARANTINED_SYNTHETIC_CIRCLES,
@@ -24,12 +18,22 @@ export {
 const META_MARKER = '\n[AJO_MEMORY_META]'
 
 /**
+ * Runtime registry of active circles, proposals, and one-time confirmation challenges in memory.
+ * Per AGENTS.md preview constraints, no runtime SQLite or filesystem database is used.
+ * Confirmed memories are written to Walrus Mainnet via @mysten-incubation/memwal.
+ */
+const circleRegistry = new Map()
+const proposalsStore = new Map()
+const authChallenges = new Map()
+const consumedChallengeNonces = new Set()
+const sessionConfirmedCache = new Map() // namespace -> Map<blobId, MemoryRecord>
+
+/**
  * Reject runtime operations against quarantined synthetic sample circles.
- * Checks both the static quarantine set and durable `quarantined_records` table.
  * @param {string} circleId
  */
 export function assertCircleNotQuarantined(circleId) {
-  if (isQuarantinedSyntheticRecord(circleId) || isRecordQuarantinedInDb(circleId)) {
+  if (isQuarantinedSyntheticRecord(circleId)) {
     throw new WalletAuthError(
       `Circle "${circleId}" is quarantined because its namespace contains synthetic sample history that is blocked from runtime use.`,
       403
@@ -193,13 +197,13 @@ export function upsertCircleRoster(circleData, options = {}) {
     }
     const normAddr = normalizeSuiAddress(m.address)
     if (seenMemberIds.has(m.id)) {
-      throw new StorageConflictError(
+      throw new WalletAuthError(
         `Duplicate member ID "${m.id}" in circle "${trimmedCircleId}". Each member must have a unique member ID.`,
         409
       )
     }
     if (seenNormalizedAddresses.has(normAddr)) {
-      throw new StorageConflictError(
+      throw new WalletAuthError(
         `Duplicate member wallet address "${normAddr}" in circle "${trimmedCircleId}". Each member must have a unique Sui wallet address.`,
         409
       )
@@ -208,7 +212,7 @@ export function upsertCircleRoster(circleData, options = {}) {
     seenNormalizedAddresses.add(normAddr)
   }
 
-  const existing = getCircleRoster(trimmedCircleId)
+  const existing = circleRegistry.get(trimmedCircleId)
   const authAddr = options.authenticatedWalletAddress
     ? normalizeSuiAddress(options.authenticatedWalletAddress)
     : ''
@@ -259,93 +263,13 @@ export function upsertCircleRoster(circleData, options = {}) {
     updatedAt: new Date().toISOString(),
   }
 
-  const db = getDatabase()
-  withTransaction(db, () => {
-    db.prepare(`
-      INSERT INTO circles (
-        circle_id, circle_name, pool_address, normalized_pool_address,
-        contribution_per_member, token_type, cycle_length, current_cycle,
-        organizer_address, normalized_organizer_address, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(circle_id) DO UPDATE SET
-        circle_name = excluded.circle_name,
-        pool_address = excluded.pool_address,
-        normalized_pool_address = excluded.normalized_pool_address,
-        contribution_per_member = excluded.contribution_per_member,
-        token_type = excluded.token_type,
-        cycle_length = excluded.cycle_length,
-        current_cycle = excluded.current_cycle,
-        organizer_address = excluded.organizer_address,
-        normalized_organizer_address = excluded.normalized_organizer_address,
-        updated_at = excluded.updated_at
-    `).run(
-      record.circleId,
-      record.circleName,
-      record.poolAddress,
-      normalizeSuiAddress(record.poolAddress),
-      record.contributionPerMember,
-      record.tokenType,
-      record.cycleLength,
-      record.currentCycle,
-      record.organizerAddress,
-      normalizeSuiAddress(record.organizerAddress),
-      record.updatedAt
-    )
-
-    db.prepare('DELETE FROM circle_members WHERE circle_id = ?').run(record.circleId)
-
-    const insertMember = db.prepare(`
-      INSERT INTO circle_members (
-        circle_id, member_id, name, address, normalized_address, avatar_color, position
-      ) VALUES (?, ?, ?, ?, ?, ?, ?)
-    `)
-    normalizedMembers.forEach((m, index) => {
-      insertMember.run(
-        record.circleId,
-        m.id,
-        m.name,
-        m.address,
-        normalizeSuiAddress(m.address),
-        m.avatarColor,
-        index
-      )
-    })
-  })
-
+  circleRegistry.set(record.circleId, record)
   return record
 }
 
 export function getCircleRoster(circleId) {
-  if (!circleId) return null
-  const trimmed = String(circleId).trim()
-  if (isQuarantinedSyntheticRecord(trimmed) || isRecordQuarantinedInDb(trimmed)) {
-    return null
-  }
-  const db = getDatabase()
-  const row = db.prepare('SELECT * FROM circles WHERE circle_id = ?').get(trimmed)
-  if (!row) return null
-
-  const memberRows = db
-    .prepare('SELECT * FROM circle_members WHERE circle_id = ? ORDER BY position ASC')
-    .all(trimmed)
-
-  return {
-    circleId: row.circle_id,
-    circleName: row.circle_name,
-    poolAddress: row.pool_address,
-    contributionPerMember: Number(row.contribution_per_member),
-    tokenType: row.token_type,
-    cycleLength: row.cycle_length,
-    currentCycle: Number(row.current_cycle),
-    organizerAddress: row.organizer_address,
-    updatedAt: row.updated_at,
-    members: memberRows.map((m) => ({
-      id: m.member_id,
-      name: m.name,
-      address: m.address,
-      avatarColor: m.avatar_color,
-    })),
-  }
+  if (!circleId || isQuarantinedSyntheticRecord(circleId)) return null
+  return circleRegistry.get(String(circleId).trim()) || null
 }
 
 /**
@@ -353,12 +277,9 @@ export function getCircleRoster(circleId) {
  * @param {{ memberAddress?: string }} [filter]
  */
 export function listCircleRosters(filter = {}) {
-  const db = getDatabase()
-  const circleRows = db.prepare('SELECT circle_id FROM circles ORDER BY updated_at DESC').all()
-  const all = circleRows
-    .map((r) => getCircleRoster(r.circle_id))
-    .filter((c) => Boolean(c) && !isQuarantinedSyntheticRecord(c.circleId))
-
+  const all = Array.from(circleRegistry.values()).filter(
+    (c) => !isQuarantinedSyntheticRecord(c.circleId)
+  )
   if (!filter.memberAddress) {
     return all
   }
@@ -376,7 +297,7 @@ export function listCircleRosters(filter = {}) {
  */
 export function verifyCircleMembership(circleId, { memberId, memberAddress }) {
   assertCircleNotQuarantined(circleId)
-  const circle = getCircleRoster(circleId)
+  const circle = circleRegistry.get(String(circleId || '').trim())
   if (!circle) {
     throw new WalletAuthError(
       `Circle "${circleId}" is not registered on the server. Activate or register the circle first.`,
@@ -547,38 +468,6 @@ export function parseRecalledMemory(hit, fallbackCircleId = 'default') {
   }
 }
 
-function mapProposalRow(row) {
-  if (!row) return null
-  let memberIds = []
-  try {
-    memberIds = JSON.parse(row.member_ids_json || '[]')
-  } catch {
-    memberIds = row.member_id ? [row.member_id] : []
-  }
-  return {
-    id: row.id,
-    circleId: row.circle_id,
-    category: row.category,
-    memoryType: row.memory_type,
-    title: row.title,
-    quote: row.quote,
-    suggestedAction: row.suggested_action,
-    memberId: row.member_id || undefined,
-    memberIds,
-    cycle: Number(row.cycle) || 1,
-    txDigest: row.tx_digest || undefined,
-    proposedBy: row.proposed_by,
-    proposalHash: row.proposal_hash,
-    status: row.status,
-    walrusBlobId: row.walrus_blob_id || undefined,
-    confirmedBy: row.confirmed_by || undefined,
-    confirmationType: row.confirmation_type || undefined,
-    confirmingAddress: row.confirming_address || undefined,
-    createdAt: row.created_at,
-    confirmedAt: row.confirmed_at || undefined,
-  }
-}
-
 /**
  * Create a memory proposal on the server (Step 1 of Propose -> Confirm -> Write).
  * The agent or member may only PROPOSE memories; nothing is written to Walrus until confirmed.
@@ -628,65 +517,27 @@ export function proposeCircleMemory(input) {
     proposalHash: computeProposalHash(draft),
   }
 
-  const db = getDatabase()
-  db.prepare(`
-    INSERT INTO proposals (
-      id, circle_id, category, memory_type, title, quote, suggested_action,
-      member_id, member_ids_json, cycle, tx_digest, proposed_by, proposal_hash,
-      status, created_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
-  `).run(
-    proposal.id,
-    proposal.circleId,
-    proposal.category,
-    proposal.memoryType,
-    proposal.title,
-    proposal.quote,
-    proposal.suggestedAction,
-    proposal.memberId ?? null,
-    JSON.stringify(proposal.memberIds),
-    proposal.cycle,
-    proposal.txDigest ?? null,
-    proposal.proposedBy,
-    proposal.proposalHash,
-    proposal.createdAt
-  )
-
+  proposalsStore.set(proposal.id, proposal)
   return proposal
 }
 
 export function getPendingProposals(circleId) {
-  const db = getDatabase()
-  const rows = circleId
-    ? db
-        .prepare(
-          "SELECT * FROM proposals WHERE circle_id = ? AND status = 'pending' ORDER BY created_at DESC"
-        )
-        .all(String(circleId).trim())
-    : db.prepare("SELECT * FROM proposals WHERE status = 'pending' ORDER BY created_at DESC").all()
-  return rows.map(mapProposalRow)
+  return Array.from(proposalsStore.values()).filter(
+    (p) => p.status === 'pending' && (!circleId || p.circleId === String(circleId).trim())
+  )
 }
 
 export function getProposalById(proposalId) {
   if (!proposalId || typeof proposalId !== 'string') return null
-  const db = getDatabase()
-  const row = db.prepare('SELECT * FROM proposals WHERE id = ?').get(proposalId.trim())
-  return mapProposalRow(row)
+  return proposalsStore.get(proposalId.trim()) || null
 }
 
 export function getCircleProposals(circleId, { status } = {}) {
   if (!circleId) return []
-  const db = getDatabase()
-  const rows = status
-    ? db
-        .prepare(
-          'SELECT * FROM proposals WHERE circle_id = ? AND status = ? ORDER BY created_at DESC'
-        )
-        .all(String(circleId).trim(), status)
-    : db
-        .prepare('SELECT * FROM proposals WHERE circle_id = ? ORDER BY created_at DESC')
-        .all(String(circleId).trim())
-  return rows.map(mapProposalRow)
+  const trimmed = String(circleId).trim()
+  return Array.from(proposalsStore.values()).filter(
+    (p) => p.circleId === trimmed && (!status || p.status === status)
+  )
 }
 
 /**
@@ -696,7 +547,7 @@ export function getCircleProposals(circleId, { status } = {}) {
  * - `proposalId`
  * - `proposalHash` (SHA-256 of canonical proposal content)
  * - `member.id` and normalized `member.address`
- * - `nonce` (single-use, persisted in SQLite `confirmation_challenges`)
+ * - `nonce` (single-use)
  * - `expiresAt`
  */
 export function issueConfirmationChallenge({ circleId, proposalId, memberId, memberAddress }) {
@@ -741,24 +592,18 @@ export function issueConfirmationChallenge({ circleId, proposalId, memberId, mem
     `ExpiresAt: ${expiresAt}`,
   ].join('\n')
 
-  const db = getDatabase()
-  db.prepare(`
-    INSERT INTO confirmation_challenges (
-      nonce, circle_id, proposal_id, proposal_hash, member_id, member_address,
-      message, issued_at, expires_at, expires_at_ms, consumed
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
-  `).run(
+  authChallenges.set(nonce, {
     nonce,
     circleId,
-    storedProposal.id,
+    proposalId: storedProposal.id,
     proposalHash,
-    member.id,
-    normalizedMemberAddress,
+    memberId: member.id,
+    memberAddress: normalizedMemberAddress,
     message,
     issuedAt,
     expiresAt,
-    expiresAtMs
-  )
+    expiresAtMs,
+  })
 
   return {
     nonce,
@@ -779,7 +624,7 @@ export function issueConfirmationChallenge({ circleId, proposalId, memberId, mem
  *    bound to `(circleId, proposalId, proposalHash, memberId, memberAddress)` and a signature whose
  *    Sui public key derives to `normalizeSuiAddress(member.address)`.
  * 2. A valid signature from an unrelated key is ALWAYS rejected.
- * 3. `challengeNonce` is marked `consumed = 1` in SQLite immediately on first lookup (strictly one-time use across restarts).
+ * 3. `challengeNonce` is consumed immediately on first lookup (strictly one-time use).
  * 4. Organizer-entered records (`organizer_entered`) can only be submitted by the circle's registered
  *    `organizerAddress` and are labeled distinctly from member-signed confirmations.
  * 5. Neither a single member signature nor an organizer-entered record is labeled as full group consensus.
@@ -826,8 +671,6 @@ export async function confirmAndWriteMemory(input, env = process.env) {
   let confirmedByLabel = `Organizer-entered record by ${member.name} (${normalizedMemberAddr}) — organizer entry only, not member-signed consensus`
   let verifiedProposalHash = undefined
 
-  const db = getDatabase()
-
   if (wantsSignatureVerification) {
     if (!challengeNonce || !signature || !proposalId) {
       throw new WalletAuthError(
@@ -837,35 +680,17 @@ export async function confirmAndWriteMemory(input, env = process.env) {
     }
 
     const trimmedNonce = String(challengeNonce).trim()
-    // Atomically consume the confirmation challenge nonce in SQLite before any validation
-    const challenge = withTransaction(db, () => {
-      const row = db
-        .prepare('SELECT * FROM confirmation_challenges WHERE nonce = ?')
-        .get(trimmedNonce)
-      if (!row || Number(row.consumed) === 1) {
-        return null
-      }
-      const updateRes = db
-        .prepare(
-          'UPDATE confirmation_challenges SET consumed = 1, consumed_at = ? WHERE nonce = ? AND consumed = 0'
-        )
-        .run(new Date().toISOString(), trimmedNonce)
-      if (updateRes.changes !== 1) {
-        return null
-      }
-      return {
-        nonce: row.nonce,
-        circleId: row.circle_id,
-        proposalId: row.proposal_id,
-        proposalHash: row.proposal_hash,
-        memberId: row.member_id,
-        memberAddress: row.member_address,
-        message: row.message,
-        issuedAt: row.issued_at,
-        expiresAt: row.expires_at,
-        expiresAtMs: Number(row.expires_at_ms),
-      }
-    })
+    if (consumedChallengeNonces.has(trimmedNonce)) {
+      throw new WalletAuthError(
+        'Invalid or already-consumed confirmation challenge nonce.',
+        401
+      )
+    }
+
+    const challenge = authChallenges.get(trimmedNonce)
+    // Enforce strict one-time challenge consumption before any validation
+    authChallenges.delete(trimmedNonce)
+    consumedChallengeNonces.add(trimmedNonce)
 
     if (!challenge) {
       throw new WalletAuthError(
@@ -1016,39 +841,23 @@ export async function confirmAndWriteMemory(input, env = process.env) {
       createdAt: confirmedAt,
     }
 
-    withTransaction(db, () => {
-      if (proposalId) {
-        db.prepare(`
-          UPDATE proposals
-          SET status = 'confirmed',
-              walrus_blob_id = ?,
-              confirmed_by = ?,
-              confirmation_type = ?,
-              confirming_address = ?,
-              confirmed_at = ?
-          WHERE id = ?
-        `).run(
-          savedRecord.walrusBlobId,
-          confirmedByLabel,
-          confirmationType,
-          normalizedMemberAddr,
-          confirmedAt,
-          String(proposalId).trim()
-        )
-      }
+    if (proposalId && proposalsStore.has(String(proposalId).trim())) {
+      const existingProp = proposalsStore.get(String(proposalId).trim())
+      proposalsStore.set(String(proposalId).trim(), {
+        ...existingProp,
+        status: 'confirmed',
+        walrusBlobId: savedRecord.walrusBlobId,
+        confirmedBy: confirmedByLabel,
+        confirmationType,
+        confirmingAddress: normalizedMemberAddr,
+        confirmedAt,
+      })
+    }
 
-      db.prepare(`
-        INSERT OR REPLACE INTO confirmed_memories_cache (
-          walrus_blob_id, namespace, circle_id, record_json, created_at
-        ) VALUES (?, ?, ?, ?, ?)
-      `).run(
-        savedRecord.walrusBlobId,
-        namespace,
-        circle.circleId,
-        JSON.stringify(savedRecord),
-        confirmedAt
-      )
-    })
+    if (!sessionConfirmedCache.has(namespace)) {
+      sessionConfirmedCache.set(namespace, new Map())
+    }
+    sessionConfirmedCache.get(namespace).set(savedRecord.walrusBlobId, savedRecord)
 
     return savedRecord
   } finally {
@@ -1086,10 +895,7 @@ export async function recallCircleMemories(circleId, query, options = {}, env = 
       .filter((hit) => Boolean(hit.blob_id))
       .map((hit) => parseRecalledMemory(hit, circleId))
       .filter((rec) => {
-        if (
-          !options.includeQuarantinedForAudit &&
-          (isQuarantinedSyntheticRecord(rec) || isRecordQuarantinedInDb(rec.walrusBlobId))
-        ) {
+        if (!options.includeQuarantinedForAudit && isQuarantinedSyntheticRecord(rec)) {
           return false
         }
         if (options.category && rec.category !== options.category) return false
@@ -1105,22 +911,12 @@ export async function recallCircleMemories(circleId, query, options = {}, env = 
       })
 
     if (!options.includeQuarantinedForAudit) {
-      const db = getDatabase()
-      const upsertCache = db.prepare(`
-        INSERT OR REPLACE INTO confirmed_memories_cache (
-          walrus_blob_id, namespace, circle_id, record_json, created_at
-        ) VALUES (?, ?, ?, ?, ?)
-      `)
+      if (!sessionConfirmedCache.has(namespace)) {
+        sessionConfirmedCache.set(namespace, new Map())
+      }
+      const nsCache = sessionConfirmedCache.get(namespace)
       for (const r of records) {
-        if (r.walrusBlobId) {
-          upsertCache.run(
-            r.walrusBlobId,
-            namespace,
-            circleId,
-            JSON.stringify(r),
-            r.createdAt || new Date().toISOString()
-          )
-        }
+        if (r.walrusBlobId) nsCache.set(r.walrusBlobId, r)
       }
     }
 
@@ -1138,7 +934,7 @@ export async function recallCircleMemories(circleId, query, options = {}, env = 
 
 /**
  * List known memories for a circle by recalling recent records from Walrus Memory
- * and merging with any memories confirmed in durable SQLite cache.
+ * and merging with any memories confirmed in the current server session.
  */
 export async function listCircleMemories(circleId, env = process.env) {
   assertCircleNotQuarantined(circleId)
@@ -1151,31 +947,16 @@ export async function listCircleMemories(circleId, env = process.env) {
   )
 
   const byBlob = new Map()
-  const db = getDatabase()
-  const cachedRows = db
-    .prepare(
-      'SELECT walrus_blob_id, record_json FROM confirmed_memories_cache WHERE namespace = ? ORDER BY created_at DESC'
-    )
-    .all(namespace)
-
-  for (const row of cachedRows) {
-    try {
-      const rec = JSON.parse(row.record_json)
-      if (!isQuarantinedSyntheticRecord(rec) && !isRecordQuarantinedInDb(row.walrus_blob_id)) {
-        byBlob.set(row.walrus_blob_id, rec)
+  const nsCache = sessionConfirmedCache.get(namespace)
+  if (nsCache) {
+    for (const [blobId, rec] of nsCache.entries()) {
+      if (!isQuarantinedSyntheticRecord(rec)) {
+        byBlob.set(blobId, rec)
       }
-    } catch {
-      // Ignore malformed cached JSON
     }
   }
-
   for (const rec of recalled.records) {
-    if (
-      rec.walrusBlobId &&
-      !isQuarantinedSyntheticRecord(rec) &&
-      !isRecordQuarantinedInDb(rec.walrusBlobId) &&
-      !byBlob.has(rec.walrusBlobId)
-    ) {
+    if (rec.walrusBlobId && !isQuarantinedSyntheticRecord(rec) && !byBlob.has(rec.walrusBlobId)) {
       byBlob.set(rec.walrusBlobId, rec)
     }
   }
@@ -1208,7 +989,7 @@ export async function restoreCircleMemoriesFromWalrus(circleId, limit, env = pro
       restoreResult: restoreRes,
       records: recalled.records,
       limitationsNote:
-        'Walrus Memory is a semantic vector store for confirmed circle memories. restore() re-indexes on-chain Walrus blobs missing from the relayer vector index (bounded by limit and relayer candidate caps). Circle rosters, proposals, wallet sessions, and verified transaction evidence are persisted in the server SQLite database.',
+        'Walrus Memory is a semantic vector store for confirmed circle memories. restore() re-indexes on-chain Walrus blobs missing from the relayer vector index (bounded by limit and relayer candidate caps), and recent memories are retrieved via semantic recall. Per preview container constraints, no local runtime database is used; circle rosters, wallet sessions, pending proposals, and submitted digest lists are held in server memory only, while Tatum is the authoritative source of Sui payment evidence.',
     }
   } finally {
     client.destroy()
