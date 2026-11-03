@@ -738,6 +738,10 @@ export default function App() {
   // Activate Circle in Step 4 of Create flow
   const handleActivateCircle = async () => {
     setCreateError(null)
+    if (!memwalHealth.configured) {
+      setCreateError('Configure Walrus Memory before activating a circle. Circle setup and roster data must be saved to Walrus to survive a server restart.')
+      return
+    }
     const slug = slugifyCircleId(circleName)
     if (!slug) {
       setCreateError('Please enter a valid circle name.')
@@ -753,7 +757,7 @@ export default function App() {
     }
 
     try {
-      const registered = await memoryStore.registerCircle({
+      const result = await memoryStore.registerCircle({
         circleId: slug,
         circleName: circleName.trim(),
         poolAddress: poolAddress.trim(),
@@ -764,12 +768,25 @@ export default function App() {
         members,
         organizerAddress: members[0]?.address,
       })
+      const registered = result.circle
+      if (!registered?.circleId || !result.walrusBlobId) {
+        throw new Error('The circle was registered, but Walrus did not confirm a saved configuration blob. Retry activation before relying on restart recovery.')
+      }
       setCircleId(registered.circleId)
       setLookupCircleSlug(registered.circleId)
       if (!confirmingMemberId && members[0]?.id) {
         setConfirmingMemberId(members[0].id)
       }
       setActiveTab('dashboard')
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: Date.now().toString(),
+          sender: 'steward',
+          text: `Circle configuration and roster saved to Walrus Mainnet (Blob ID: ${result.walrusBlobId}). Organizer-entered setup; not member-signed group consensus.`,
+          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        },
+      ])
       if (memwalHealth.configured) {
         await refreshMemories(registered.circleId)
       }
@@ -1748,6 +1765,10 @@ export default function App() {
                   </div>
                 </div>
 
+                <p className="rounded-lg border border-utility-warning-200 bg-utility-warning-50 p-md text-sm text-utility-warning-700">
+                  Activating saves the circle configuration and member names and Sui addresses to encrypted Walrus Memory on Mainnet so it can be restored after a server restart. This is organizer-entered setup, not a vote by the group.
+                </p>
+
                 <div className="pt-md flex items-center justify-between">
                   <button
                     onClick={() => setCreateStep(3)}
@@ -1757,9 +1778,10 @@ export default function App() {
                   </button>
                   <button
                     onClick={handleActivateCircle}
+                    disabled={!memwalHealth.configured}
                     className="inline-flex items-center gap-sm rounded-lg border border-transparent bg-brand-solid px-lg py-sm text-sm font-semibold text-primary-on-brand shadow-xs hover:bg-brand-solid-hover"
                   >
-                    <span>Activate savings circle</span>
+                    <span>Activate + save to Walrus</span>
                     <Check className="size-4 text-fg-white shrink-0" />
                   </button>
                 </div>

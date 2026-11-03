@@ -63,13 +63,14 @@ export class WalrusMemoryStore implements MemoryStore {
     const res = await fetch('/api/memory/circles', {
       method: 'POST',
       headers: getAuthHeaders(),
-      body: JSON.stringify(params),
+      // Circle setup is not restart-recoverable until its roster and terms are on Walrus.
+      body: JSON.stringify({ ...params, persistToWalrus: true }),
     })
     const data = await res.json()
     if (!res.ok) {
       throw new Error(data.error || `HTTP ${res.status}: Failed to register circle on server`)
     }
-    return data.circle
+    return data
   }
 
   async checkHealth(): Promise<{

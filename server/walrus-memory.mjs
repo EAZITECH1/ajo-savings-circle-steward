@@ -1787,7 +1787,8 @@ export async function listCircleMemories(circleId, env = process.env) {
  *    to download and SEAL-decrypt the plaintext payloads.
  *
  * Completeness & Safety Guarantees:
- * - Never claims `complete: true` unless a valid `circle_config` is present, every non-quarantined `blob_id` from
+ * - Never claims `complete: true` unless a valid `circle_config` is present, the complete inventory was obtained,
+ *   every non-quarantined `blob_id` from
  *   `listMemories` was recovered and validated, `restoreResult.truncated === false`, `restoreResult.failed === 0`,
  *   `droppedCount === 0`, `malformedRecords.length === 0`, and `conflicts.length === 0`.
  * - Never silently picks between conflicting `circle_config` versions, conflicting policies, or conflicting
@@ -2409,6 +2410,7 @@ export async function restoreCircleFromWalrus(circleId, options = {}, env = proc
 
     const hasConflicts = conflicts.length > 0
     const hasIncompleteData =
+      !inventoryWalked ||
       !restoredCircle ||
       missingBlobIds.length > 0 ||
       missingFields.length > 0 ||
@@ -2426,6 +2428,11 @@ export async function restoreCircleFromWalrus(circleId, options = {}, env = proc
     if (missingFields.length > 0) {
       recoveryPath.push(
         'Persist the circle configuration and member roster to Walrus (POST /api/memory/circles/persist) so future restarts can reconstruct the circle roster and terms.'
+      )
+    }
+    if (!inventoryWalked) {
+      recoveryPath.push(
+        'This MemWal client does not expose listMemories, so the app cannot compare recovered records against the complete namespace inventory. Update to a supported MemWal SDK/API before treating this restore as complete.'
       )
     }
     if (missingBlobIds.length > 0 || isRestoreTruncated) {
@@ -2454,6 +2461,7 @@ export async function restoreCircleFromWalrus(circleId, options = {}, env = proc
       records: activeMemories,
       restoredTxAssociations,
       tatumReverifications,
+      inventoryAvailable: inventoryWalked,
       expectedBlobCount: expectedBlobIds.size,
       recoveredBlobCount: rawHitsByBlobId.size - quarantinedRecordsSkipped.length,
       missingBlobIds,

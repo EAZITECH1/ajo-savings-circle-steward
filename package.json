@@ -6,7 +6,8 @@
     "dev": "node server/index.mjs",
     "test": "node --test tests/*.test.mjs",
     "inventory:walrus": "node scripts/inventory-walrus-mainnet.mjs",
-    "restore:walrus": "node scripts/restore-from-walrus.mjs"
+    "restore:walrus": "node scripts/restore-from-walrus.mjs",
+    "verify:live-recovery": "node scripts/verify-live-recovery.mjs"
   },
   "dependencies": {
     "@mysten-incubation/memwal": "^0.1.12",
