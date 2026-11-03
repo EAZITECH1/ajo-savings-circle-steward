@@ -2003,9 +2003,8 @@ export default function App() {
               <div className="pt-sm border-t border-secondary space-y-sm">
                 <p className="text-xs text-tertiary">
                   Persistence note: Confirmed memories are stored on Walrus Mainnet. Circle rosters,
-                  wallet auth sessions, pending unconfirmed proposals, and submitted digest lists are
-                  held in server runtime memory only (per repository rules, no local database is
-                  used) and must be re-registered after a server restart.
+                  proposals, hashed wallet sessions, and Tatum-verified transaction records are
+                  persisted in the server SQLite database across restarts.
                 </p>
                 <div className="flex flex-col sm:flex-row gap-sm">
                   <input

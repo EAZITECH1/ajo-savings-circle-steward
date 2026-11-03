@@ -95,31 +95,8 @@ test(
     assert.equal(matchingTransfer.executionSuccess, true)
     assert.equal(new Date(matchingTransfer.timestampMs).toISOString(), PUBLIC_TESTNET_TIMESTAMP)
 
-    // 2. End-to-end contribution verification: On-time window -> Chain status Verified, Policy Accepted on time
+    // 2. End-to-end contribution verification: Deadline before tx timestamp -> Chain status Late
     clearSubmittedDigests('live-testnet-circle', 1, PUBLIC_TESTNET_SENDER)
-    const onTimeVerified = await verifyMemberContributionOnSui({
-      circleId: 'live-testnet-circle',
-      poolAddress: PUBLIC_TESTNET_RECIPIENT,
-      memberAddress: PUBLIC_TESTNET_SENDER,
-      memberId: 'm1',
-      memberName: 'Testnet Contributor',
-      token: '0x2::sui::SUI',
-      expectedAmount: 1,
-      windowStart: '2026-11-03T00:00:00.000Z',
-      windowEnd: '2026-11-03T23:59:59.000Z',
-      cycle: 1,
-      txDigest: PUBLIC_TESTNET_TX_DIGEST,
-      withMemory: false,
-    })
-    assert.equal(onTimeVerified.status, 'Verified')
-    assert.equal(onTimeVerified.code, 'verified')
-    assert.equal(onTimeVerified.amountReceived, 1)
-    assert.equal(onTimeVerified.timestamp, PUBLIC_TESTNET_TIMESTAMP)
-    assert.equal(onTimeVerified.policy.chainStatus, 'Verified')
-    assert.equal(onTimeVerified.policy.policyStatus, 'Accepted on time')
-    assert.equal(onTimeVerified.policy.countsTowardPot, true)
-
-    // 3. End-to-end contribution verification: Deadline before tx timestamp -> Chain status Late
     clearSubmittedDigests('live-testnet-circle', 2, PUBLIC_TESTNET_SENDER)
     const lateVerified = await verifyMemberContributionOnSui({
       circleId: 'live-testnet-circle',
@@ -141,6 +118,32 @@ test(
     assert.equal(lateVerified.policy.chainStatus, 'Late')
     assert.equal(lateVerified.policy.policyStatus, 'Unexcused late payment')
     assert.equal(lateVerified.policy.countsTowardPot, false)
+
+    // Clear cycle 2 before verifying the same public digest in cycle 1 (since duplicate digest claims across cycles are blocked)
+    clearSubmittedDigests('live-testnet-circle', 2, PUBLIC_TESTNET_SENDER)
+
+    // 3. End-to-end contribution verification: On-time window -> Chain status Verified, Policy Accepted on time
+    const onTimeVerified = await verifyMemberContributionOnSui({
+      circleId: 'live-testnet-circle',
+      poolAddress: PUBLIC_TESTNET_RECIPIENT,
+      memberAddress: PUBLIC_TESTNET_SENDER,
+      memberId: 'm1',
+      memberName: 'Testnet Contributor',
+      token: '0x2::sui::SUI',
+      expectedAmount: 1,
+      windowStart: '2026-11-03T00:00:00.000Z',
+      windowEnd: '2026-11-03T23:59:59.000Z',
+      cycle: 1,
+      txDigest: PUBLIC_TESTNET_TX_DIGEST,
+      withMemory: false,
+    })
+    assert.equal(onTimeVerified.status, 'Verified')
+    assert.equal(onTimeVerified.code, 'verified')
+    assert.equal(onTimeVerified.amountReceived, 1)
+    assert.equal(onTimeVerified.timestamp, PUBLIC_TESTNET_TIMESTAMP)
+    assert.equal(onTimeVerified.policy.chainStatus, 'Verified')
+    assert.equal(onTimeVerified.policy.policyStatus, 'Accepted on time')
+    assert.equal(onTimeVerified.policy.countsTowardPot, true)
   }
 )
 

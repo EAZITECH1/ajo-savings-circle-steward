@@ -176,6 +176,7 @@ test('verifyMemberContributionOnSui: handles unconfigured Tatum, malformed diges
   assert.equal(lateWithoutMem.policy.countsTowardPot, false)
 
   // 5. Split payments: 2 sequential partial digests for member 0x0005 within 48h -> aggregated to Verified
+  clearSubmittedDigests('test-circle-sui', 5, '0x0002')
   clearSubmittedDigests('test-circle-sui', 5, '0x0005')
   const splitRpcCaller = async (_chain, body) => {
     const requestedDigest = body.params[0]

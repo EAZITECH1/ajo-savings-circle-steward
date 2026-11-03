@@ -2,16 +2,10 @@ import crypto from 'node:crypto'
 import { verifyPersonalMessageSignature } from '@mysten/sui/verify'
 import { Ed25519PublicKey } from '@mysten/sui/keypairs/ed25519'
 import { normalizeSuiAddress } from './payment-policy.mjs'
+import { getDatabase, hashSessionToken, withTransaction } from './db.mjs'
 
 const CHALLENGE_TTL_MS = 10 * 60 * 1000 // 10 minutes
 const SESSION_TTL_MS = 12 * 60 * 60 * 1000 // 12 hours
-
-/**
- * Runtime store for one-time wallet authentication challenges and verified wallet sessions.
- * Per AGENTS.md, no local database is used; sessions are held in server memory.
- */
-const walletAuthChallenges = new Map()
-const walletSessions = new Map()
 
 export class WalletAuthError extends Error {
   /**
@@ -221,15 +215,12 @@ export function issueWalletAuthChallenge({ address }) {
     `ExpiresAt: ${expiresAt}`,
   ].join('\n')
 
-  walletAuthChallenges.set(challengeId, {
-    challengeId,
-    nonce,
-    address: normalizedAddress,
-    message,
-    issuedAt,
-    expiresAt,
-    expiresAtMs,
-  })
+  const db = getDatabase()
+  db.prepare(`
+    INSERT INTO wallet_auth_challenges (
+      challenge_id, nonce, address, message, issued_at, expires_at, expires_at_ms, consumed
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, 0)
+  `).run(challengeId, nonce, normalizedAddress, message, issuedAt, expiresAt, expiresAtMs)
 
   return {
     challengeId,
@@ -243,7 +234,9 @@ export function issueWalletAuthChallenge({ address }) {
 
 /**
  * Verify a signed wallet authentication challenge and issue a server-side session token.
- * Enforces strict one-time challenge consumption (deleted on first lookup).
+ * Enforces strict one-time challenge consumption persisted in SQLite (`consumed = 1`).
+ * Stores only the SHA-256 hash (`token_hash`) of the bearer session token in SQLite;
+ * raw session tokens and wallet signature bytes are never persisted to disk.
  *
  * @param {{
  *   challengeId: string,
@@ -262,9 +255,34 @@ export async function verifyWalletAuthChallenge({
     throw new WalletAuthError('challengeId is required.', 400)
   }
 
-  const challenge = walletAuthChallenges.get(challengeId)
-  // Consume immediately on lookup to prevent replay even on failed attempts
-  walletAuthChallenges.delete(challengeId)
+  const db = getDatabase()
+  const trimmedChallengeId = challengeId.trim()
+
+  const challenge = withTransaction(db, () => {
+    const row = db
+      .prepare('SELECT * FROM wallet_auth_challenges WHERE challenge_id = ?')
+      .get(trimmedChallengeId)
+    if (!row || Number(row.consumed) === 1) {
+      return null
+    }
+    const updateRes = db
+      .prepare(
+        'UPDATE wallet_auth_challenges SET consumed = 1, consumed_at = ? WHERE challenge_id = ? AND consumed = 0'
+      )
+      .run(new Date().toISOString(), trimmedChallengeId)
+    if (updateRes.changes !== 1) {
+      return null
+    }
+    return {
+      challengeId: row.challenge_id,
+      nonce: row.nonce,
+      address: row.address,
+      message: row.message,
+      issuedAt: row.issued_at,
+      expiresAt: row.expires_at,
+      expiresAtMs: Number(row.expires_at_ms),
+    }
+  })
 
   if (!challenge) {
     throw new WalletAuthError(
@@ -293,27 +311,30 @@ export async function verifyWalletAuthChallenge({
   })
 
   const token = crypto.randomBytes(32).toString('hex')
+  const tokenHash = hashSessionToken(token)
   const authenticatedAt = new Date().toISOString()
   const expiresAtMs = Date.now() + SESSION_TTL_MS
   const expiresAt = new Date(expiresAtMs).toISOString()
 
-  const session = {
-    token,
-    walletAddress: verified.address,
-    publicKeyBase64: verified.publicKeyBase64,
-    scheme: verified.scheme,
+  db.prepare(`
+    INSERT INTO wallet_sessions (
+      token_hash, wallet_address, public_key_base64, scheme, authenticated_at, expires_at, expires_at_ms, revoked
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, 0)
+  `).run(
+    tokenHash,
+    verified.address,
+    verified.publicKeyBase64,
+    verified.scheme,
     authenticatedAt,
     expiresAt,
-    expiresAtMs,
-  }
-
-  walletSessions.set(token, session)
+    expiresAtMs
+  )
 
   return {
     token,
-    walletAddress: session.walletAddress,
-    authenticatedAt: session.authenticatedAt,
-    expiresAt: session.expiresAt,
+    walletAddress: verified.address,
+    authenticatedAt,
+    expiresAt,
   }
 }
 
@@ -333,18 +354,29 @@ export function extractSessionToken(req) {
 }
 
 /**
- * Look up an active, non-expired wallet session by token.
+ * Look up an active, non-expired wallet session by token (hashes the token with SHA-256 before lookup).
  * @param {string | null | undefined} token
  */
 export function getWalletSessionByToken(token) {
-  if (!token || typeof token !== 'string') return null
-  const session = walletSessions.get(token.trim())
-  if (!session) return null
-  if (Date.now() > session.expiresAtMs) {
-    walletSessions.delete(token.trim())
+  if (!token || typeof token !== 'string' || !token.trim()) return null
+  const db = getDatabase()
+  const tokenHash = hashSessionToken(token)
+  const row = db
+    .prepare('SELECT * FROM wallet_sessions WHERE token_hash = ? AND revoked = 0')
+    .get(tokenHash)
+  if (!row) return null
+  if (Date.now() > Number(row.expires_at_ms)) {
+    db.prepare('UPDATE wallet_sessions SET revoked = 1 WHERE token_hash = ?').run(tokenHash)
     return null
   }
-  return session
+  return {
+    walletAddress: row.wallet_address,
+    publicKeyBase64: row.public_key_base64,
+    scheme: row.scheme,
+    authenticatedAt: row.authenticated_at,
+    expiresAt: row.expires_at,
+    expiresAtMs: Number(row.expires_at_ms),
+  }
 }
 
 /**
@@ -368,6 +400,11 @@ export function requireWalletSession(req) {
  * @param {string | null | undefined} token
  */
 export function revokeWalletSession(token) {
-  if (!token) return false
-  return walletSessions.delete(String(token).trim())
+  if (!token || typeof token !== 'string' || !token.trim()) return false
+  const db = getDatabase()
+  const tokenHash = hashSessionToken(token)
+  const res = db
+    .prepare('UPDATE wallet_sessions SET revoked = 1 WHERE token_hash = ? AND revoked = 0')
+    .run(tokenHash)
+  return res.changes > 0
 }

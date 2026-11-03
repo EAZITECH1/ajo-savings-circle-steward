@@ -106,6 +106,7 @@ export const TUNABLE_DEFAULTS = Object.freeze({
   RATE_LIMIT_BACKOFF_MS: 1000,
   RECALL_LIMIT: 10,
   REQUEST_TIMEOUT_MS: 20000,
+  SQLITE_DB_PATH: '.data/ajo-steward.sqlite',
 })
 
 export const TunablesEnvSchema = z.object({
@@ -118,6 +119,13 @@ export const TunablesEnvSchema = z.object({
   RATE_LIMIT_BACKOFF_MS: envInt(TUNABLE_DEFAULTS.RATE_LIMIT_BACKOFF_MS, 50, 60000),
   RECALL_LIMIT: envInt(TUNABLE_DEFAULTS.RECALL_LIMIT, 1, 50),
   REQUEST_TIMEOUT_MS: envInt(TUNABLE_DEFAULTS.REQUEST_TIMEOUT_MS, 500, 120000),
+  SQLITE_DB_PATH: z
+    .string()
+    .optional()
+    .transform((val) => {
+      if (val === undefined || val.trim() === '') return TUNABLE_DEFAULTS.SQLITE_DB_PATH
+      return val.trim()
+    }),
 })
 
 export const TatumEnvSchema = z.object({
@@ -267,6 +275,7 @@ export function loadConfig(env = process.env) {
       rateLimitBackoffMs: t.RATE_LIMIT_BACKOFF_MS,
       recallLimit: t.RECALL_LIMIT,
       requestTimeoutMs: t.REQUEST_TIMEOUT_MS,
+      sqliteDbPath: t.SQLITE_DB_PATH,
     },
     integrations: {
       tatum,

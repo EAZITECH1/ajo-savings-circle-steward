@@ -5,6 +5,11 @@ import {
   evaluateContributionPolicy,
   normalizeSuiAddress,
 } from './payment-policy.mjs'
+import {
+  getDatabase,
+  withTransaction,
+  StorageConflictError,
+} from './db.mjs'
 
 /**
  * Validate a Sui transaction digest (Base58-encoded 32-byte digest, typically 43-44 chars).
@@ -73,51 +78,322 @@ class RateLimitedRpcQueue {
 const rpcQueue = new RateLimitedRpcQueue()
 
 /**
- * Runtime store of member-submitted transaction digests and server-verified chain outcomes
+ * Durable SQLite store of member-submitted transaction digests and server-verified chain outcomes
  * per `(circleId, cycle, normalizedMemberAddress)`.
- * Allows two partial payment digests from the same member to be aggregated inside the partial window,
- * and allows the Steward & policy evaluator to read server-verified chain facts without trusting
- * client-supplied verification payloads.
+ * Enforces `PRIMARY KEY (tx_digest, network)` on `submitted_transactions` so the same transaction
+ * digest cannot be claimed across conflicting members, circles, or cycles.
  */
-const submittedDigestsStore = new Map()
-const serverVerifiedContributionsStore = new Map()
+export function recordSubmittedDigest(circleId, cycle, memberAddress, digest, options = {}) {
+  const db = getDatabase()
+  const normCircleId = String(circleId || 'default').trim()
+  const normCycle = Number(cycle) || 1
+  const normMember = normalizeSuiAddress(memberAddress)
+  const trimmedDigest = String(digest || '').trim()
+  const network = String(options.network || process.env.SUI_NETWORK || 'testnet').trim()
+  const poolAddress = String(options.poolAddress || '').trim()
+  const memberId = options.memberId ? String(options.memberId).trim() : null
 
-export function recordSubmittedDigest(circleId, cycle, memberAddress, digest) {
-  const key = `${circleId || 'default'}:${cycle}:${normalizeSuiAddress(memberAddress)}`
-  if (!submittedDigestsStore.has(key)) {
-    submittedDigestsStore.set(key, [])
-  }
-  const list = submittedDigestsStore.get(key)
-  const trimmed = digest.trim()
-  if (!list.includes(trimmed)) {
-    list.push(trimmed)
-  }
-  return [...list]
+  return withTransaction(db, () => {
+    const existing = db
+      .prepare('SELECT * FROM submitted_transactions WHERE tx_digest = ? AND network = ?')
+      .get(trimmedDigest, network)
+
+    if (
+      existing &&
+      (existing.circle_id !== normCircleId ||
+        Number(existing.cycle) !== normCycle ||
+        existing.normalized_member_address !== normMember)
+    ) {
+      throw new StorageConflictError(
+        `Conflicting transaction submission: digest "${trimmedDigest}" on Sui ${network} is already claimed for circle "${existing.circle_id}", cycle ${existing.cycle}, member ${existing.normalized_member_address}.`,
+        409
+      )
+    }
+
+    if (!existing) {
+      db.prepare(`
+        INSERT INTO submitted_transactions (
+          tx_digest, network, circle_id, cycle, member_id,
+          normalized_member_address, expected_pool_address,
+          execution_status, verified_at_iso
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'unverified_claim', ?)
+      `).run(
+        trimmedDigest,
+        network,
+        normCircleId,
+        normCycle,
+        memberId,
+        normMember,
+        poolAddress,
+        new Date().toISOString()
+      )
+    }
+
+    const rows = db
+      .prepare(
+        `SELECT tx_digest FROM submitted_transactions
+         WHERE circle_id = ? AND cycle = ? AND normalized_member_address = ?
+         ORDER BY rowid ASC`
+      )
+      .all(normCircleId, normCycle, normMember)
+    return rows.map((r) => r.tx_digest)
+  })
 }
 
 export function getSubmittedDigests(circleId, cycle, memberAddress) {
-  const key = `${circleId || 'default'}:${cycle}:${normalizeSuiAddress(memberAddress)}`
-  return submittedDigestsStore.get(key) ? [...submittedDigestsStore.get(key)] : []
+  const db = getDatabase()
+  const normCircleId = String(circleId || 'default').trim()
+  const normCycle = Number(cycle) || 1
+  const normMember = normalizeSuiAddress(memberAddress)
+  const rows = db
+    .prepare(
+      `SELECT tx_digest FROM submitted_transactions
+       WHERE circle_id = ? AND cycle = ? AND normalized_member_address = ?
+       ORDER BY rowid ASC`
+    )
+    .all(normCircleId, normCycle, normMember)
+  return rows.map((r) => r.tx_digest)
 }
 
-export function recordServerVerifiedContribution(circleId, cycle, memberAddress, result) {
-  const key = `${circleId || 'default'}:${cycle}:${normalizeSuiAddress(memberAddress)}`
-  serverVerifiedContributionsStore.set(key, {
-    ...result,
-    verifiedAtServerIso: new Date().toISOString(),
+export function getPersistedSubmittedTransaction(txDigest, network = process.env.SUI_NETWORK || 'testnet') {
+  const db = getDatabase()
+  const row = db
+    .prepare('SELECT * FROM submitted_transactions WHERE tx_digest = ? AND network = ?')
+    .get(String(txDigest || '').trim(), String(network || 'testnet').trim())
+  if (!row) return null
+  return {
+    txDigest: row.tx_digest,
+    network: row.network,
+    circleId: row.circle_id,
+    cycle: Number(row.cycle),
+    memberId: row.member_id || undefined,
+    normalizedMemberAddress: row.normalized_member_address,
+    expectedPoolAddress: row.expected_pool_address,
+    observedSender: row.observed_sender || null,
+    observedRecipient: row.observed_recipient || null,
+    tokenType: row.token_type || null,
+    amount: row.amount !== null && row.amount !== undefined ? Number(row.amount) : null,
+    executionStatus: row.execution_status,
+    txTimestampMs:
+      row.tx_timestamp_ms !== null && row.tx_timestamp_ms !== undefined
+        ? Number(row.tx_timestamp_ms)
+        : null,
+    txTimestampIso: row.tx_timestamp_iso || null,
+    verifiedAtIso: row.verified_at_iso,
+  }
+}
+
+export function recordServerVerifiedContribution(
+  circleId,
+  cycle,
+  memberAddress,
+  result,
+  observedTransfers = []
+) {
+  const db = getDatabase()
+  const normCircleId = String(circleId || 'default').trim()
+  const normCycle = Number(cycle) || 1
+  const normMember = normalizeSuiAddress(memberAddress)
+  const verifiedAtIso = new Date().toISOString()
+  const network = String(result.network || process.env.SUI_NETWORK || 'testnet').trim()
+  const digestsList = Array.isArray(result.txDigests)
+    ? result.txDigests
+    : result.txDigest
+    ? [result.txDigest]
+    : []
+
+  const firstTransfer = observedTransfers[0] || null
+  const observedSender = result.observedSender || firstTransfer?.sender || null
+  const observedRecipient = result.observedRecipient || firstTransfer?.recipient || null
+  const executionStatus =
+    result.executionStatus ||
+    (firstTransfer
+      ? firstTransfer.executionSuccess === false
+        ? 'failure'
+        : 'success'
+      : result.status === 'Verified' || result.status === 'Late' || result.status === 'Partial'
+      ? 'success'
+      : 'unverified')
+
+  withTransaction(db, () => {
+    // Update authoritative chain evidence for each verified transaction digest
+    for (const t of observedTransfers) {
+      if (!t.txDigest) continue
+      const existing = db
+        .prepare('SELECT * FROM submitted_transactions WHERE tx_digest = ? AND network = ?')
+        .get(t.txDigest, network)
+
+      if (
+        existing &&
+        (existing.circle_id !== normCircleId ||
+          Number(existing.cycle) !== normCycle ||
+          existing.normalized_member_address !== normMember)
+      ) {
+        throw new StorageConflictError(
+          `Conflicting transaction submission: digest "${t.txDigest}" on Sui ${network} is already claimed for circle "${existing.circle_id}", cycle ${existing.cycle}, member ${existing.normalized_member_address}.`,
+          409
+        )
+      }
+
+      const txIso = Number.isFinite(t.timestampMs) ? new Date(t.timestampMs).toISOString() : null
+      const txStatus = t.executionSuccess === false ? 'failure' : 'success'
+
+      db.prepare(`
+        INSERT INTO submitted_transactions (
+          tx_digest, network, circle_id, cycle, member_id,
+          normalized_member_address, expected_pool_address,
+          observed_sender, observed_recipient, token_type, amount,
+          execution_status, tx_timestamp_ms, tx_timestamp_iso, verified_at_iso
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(tx_digest, network) DO UPDATE SET
+          observed_sender = excluded.observed_sender,
+          observed_recipient = excluded.observed_recipient,
+          token_type = excluded.token_type,
+          amount = excluded.amount,
+          execution_status = excluded.execution_status,
+          tx_timestamp_ms = excluded.tx_timestamp_ms,
+          tx_timestamp_iso = excluded.tx_timestamp_iso,
+          verified_at_iso = excluded.verified_at_iso
+      `).run(
+        t.txDigest,
+        network,
+        normCircleId,
+        normCycle,
+        result.memberId ?? null,
+        normMember,
+        result.expectedPoolAddress || '',
+        t.sender || null,
+        t.recipient || null,
+        t.tokenType || null,
+        typeof t.amount === 'number' ? t.amount : 0,
+        txStatus,
+        Number.isFinite(t.timestampMs) ? t.timestampMs : null,
+        txIso,
+        verifiedAtIso
+      )
+    }
+
+    db.prepare(`
+      INSERT INTO member_cycle_verifications (
+        circle_id, cycle, normalized_member_address, member_id, network,
+        status, code, tx_digest, tx_digests_json,
+        observed_sender, observed_recipient, token_received, amount_received,
+        execution_status, tx_timestamp_iso, hours_late, error, raw_notes,
+        policy_json, verified_at_iso
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(circle_id, cycle, normalized_member_address) DO UPDATE SET
+        member_id = excluded.member_id,
+        network = excluded.network,
+        status = excluded.status,
+        code = excluded.code,
+        tx_digest = excluded.tx_digest,
+        tx_digests_json = excluded.tx_digests_json,
+        observed_sender = excluded.observed_sender,
+        observed_recipient = excluded.observed_recipient,
+        token_received = excluded.token_received,
+        amount_received = excluded.amount_received,
+        execution_status = excluded.execution_status,
+        tx_timestamp_iso = excluded.tx_timestamp_iso,
+        hours_late = excluded.hours_late,
+        error = excluded.error,
+        raw_notes = excluded.raw_notes,
+        policy_json = excluded.policy_json,
+        verified_at_iso = excluded.verified_at_iso
+    `).run(
+      normCircleId,
+      normCycle,
+      normMember,
+      result.memberId ?? null,
+      network,
+      result.status,
+      result.code || result.status.toLowerCase(),
+      result.txDigest ?? null,
+      JSON.stringify(digestsList),
+      observedSender,
+      observedRecipient,
+      result.tokenReceived ?? null,
+      Number(result.amountReceived) || 0,
+      executionStatus,
+      result.timestamp ?? null,
+      result.hoursLate !== undefined ? Number(result.hoursLate) : null,
+      result.error ?? null,
+      result.rawNotes ?? null,
+      result.policy ? JSON.stringify(result.policy) : null,
+      verifiedAtIso
+    )
   })
-  return serverVerifiedContributionsStore.get(key)
+
+  return {
+    ...result,
+    observedSender,
+    observedRecipient,
+    executionStatus,
+    verifiedAtServerIso: verifiedAtIso,
+  }
 }
 
 export function getServerVerifiedContribution(circleId, cycle, memberAddress) {
-  const key = `${circleId || 'default'}:${cycle}:${normalizeSuiAddress(memberAddress)}`
-  return serverVerifiedContributionsStore.get(key) || null
+  const db = getDatabase()
+  const normCircleId = String(circleId || 'default').trim()
+  const normCycle = Number(cycle) || 1
+  const normMember = normalizeSuiAddress(memberAddress)
+  const row = db
+    .prepare(
+      `SELECT * FROM member_cycle_verifications
+       WHERE circle_id = ? AND cycle = ? AND normalized_member_address = ?`
+    )
+    .get(normCircleId, normCycle, normMember)
+  if (!row) return null
+
+  let txDigests = []
+  try {
+    txDigests = JSON.parse(row.tx_digests_json || '[]')
+  } catch {
+    txDigests = row.tx_digest ? [row.tx_digest] : []
+  }
+
+  let policy = undefined
+  if (row.policy_json) {
+    try {
+      policy = JSON.parse(row.policy_json)
+    } catch {
+      policy = undefined
+    }
+  }
+
+  return {
+    status: row.status,
+    code: row.code,
+    network: row.network,
+    txDigest: row.tx_digest || undefined,
+    txDigests,
+    observedSender: row.observed_sender || undefined,
+    observedRecipient: row.observed_recipient || undefined,
+    tokenReceived: row.token_received || undefined,
+    amountReceived: Number(row.amount_received) || 0,
+    executionStatus: row.execution_status,
+    timestamp: row.tx_timestamp_iso || undefined,
+    hoursLate: row.hours_late !== null && row.hours_late !== undefined ? Number(row.hours_late) : undefined,
+    error: row.error || undefined,
+    rawNotes: row.raw_notes || undefined,
+    policy,
+    verifiedAtServerIso: row.verified_at_iso,
+  }
 }
 
 export function clearSubmittedDigests(circleId, cycle, memberAddress) {
-  const key = `${circleId || 'default'}:${cycle}:${normalizeSuiAddress(memberAddress)}`
-  submittedDigestsStore.delete(key)
-  serverVerifiedContributionsStore.delete(key)
+  const db = getDatabase()
+  const normCircleId = String(circleId || 'default').trim()
+  const normCycle = Number(cycle) || 1
+  const normMember = normalizeSuiAddress(memberAddress)
+  withTransaction(db, () => {
+    db.prepare(
+      'DELETE FROM submitted_transactions WHERE circle_id = ? AND cycle = ? AND normalized_member_address = ?'
+    ).run(normCircleId, normCycle, normMember)
+    db.prepare(
+      'DELETE FROM member_cycle_verifications WHERE circle_id = ? AND cycle = ? AND normalized_member_address = ?'
+    ).run(normCircleId, normCycle, normMember)
+  })
 }
 
 /**
@@ -573,24 +849,68 @@ export async function verifyMemberContributionOnSui(params, options = {}) {
     return { ...unverified, policy }
   }
 
+  const buildUnverifiedFromStorageOrConflictError = (err, digestHint) => {
+    const unverified = classifyChainContribution({
+      lookupStatus: 'unavailable',
+      lookupError: err.message || 'Durable storage failure while recording transaction verification.',
+      expected: {
+        poolAddress,
+        memberAddress,
+        token: expectedToken,
+        expectedAmount: Number(expectedAmount),
+        windowStart,
+        windowEnd,
+      },
+    })
+    const policy = evaluateContributionPolicy(unverified, {
+      withMemory,
+      windowEnd,
+      graceWindowHours: tunables.graceWindowHours,
+      memories,
+      memberId,
+      memberName,
+    })
+    return {
+      ...unverified,
+      txDigest: digestHint || txDigest || undefined,
+      network: tatumCfg?.SUI_NETWORK || 'testnet',
+      conflict: err instanceof StorageConflictError ? true : undefined,
+      policy,
+    }
+  }
+
+  const resolvedNetwork = tatumCfg?.SUI_NETWORK || 'testnet'
+
   // Collect digests: explicitly provided in request or previously submitted for this member/cycle
   let digestsToVerify = []
-  if (Array.isArray(txDigests) && txDigests.length > 0) {
-    digestsToVerify = txDigests.map((d) => String(d).trim()).filter(Boolean)
-    for (const d of digestsToVerify) {
-      if (isValidSuiDigest(d)) {
-        recordSubmittedDigest(circleId, cycle, memberAddress, d)
+  try {
+    if (Array.isArray(txDigests) && txDigests.length > 0) {
+      digestsToVerify = txDigests.map((d) => String(d).trim()).filter(Boolean)
+      for (const d of digestsToVerify) {
+        if (isValidSuiDigest(d)) {
+          recordSubmittedDigest(circleId, cycle, memberAddress, d, {
+            network: resolvedNetwork,
+            poolAddress,
+            memberId,
+          })
+        }
       }
-    }
-  } else if (typeof txDigest === 'string' && txDigest.trim() !== '') {
-    const single = txDigest.trim()
-    if (isValidSuiDigest(single)) {
-      digestsToVerify = recordSubmittedDigest(circleId, cycle, memberAddress, single)
+    } else if (typeof txDigest === 'string' && txDigest.trim() !== '') {
+      const single = txDigest.trim()
+      if (isValidSuiDigest(single)) {
+        digestsToVerify = recordSubmittedDigest(circleId, cycle, memberAddress, single, {
+          network: resolvedNetwork,
+          poolAddress,
+          memberId,
+        })
+      } else {
+        digestsToVerify = [single]
+      }
     } else {
-      digestsToVerify = [single]
+      digestsToVerify = getSubmittedDigests(circleId, cycle, memberAddress)
     }
-  } else {
-    digestsToVerify = getSubmittedDigests(circleId, cycle, memberAddress)
+  } catch (err) {
+    return buildUnverifiedFromStorageOrConflictError(err, txDigest)
   }
 
   if (digestsToVerify.length === 0) {
@@ -609,9 +929,18 @@ export async function verifyMemberContributionOnSui(params, options = {}) {
         memberId,
         memberName,
       })
-      const outcome = { ...unverified, network: tatumCfg?.SUI_NETWORK, policy }
-      recordServerVerifiedContribution(circleId, cycle, memberAddress, outcome)
-      return outcome
+      const outcome = {
+        ...unverified,
+        memberId,
+        expectedPoolAddress: poolAddress,
+        network: resolvedNetwork,
+        policy,
+      }
+      try {
+        return recordServerVerifiedContribution(circleId, cycle, memberAddress, outcome, [])
+      } catch (err) {
+        return buildUnverifiedFromStorageOrConflictError(err)
+      }
     }
 
     const pending = classifyChainContribution({
@@ -634,9 +963,18 @@ export async function verifyMemberContributionOnSui(params, options = {}) {
       memberId,
       memberName,
     })
-    const outcome = { ...pending, network: tatumCfg?.SUI_NETWORK, policy }
-    recordServerVerifiedContribution(circleId, cycle, memberAddress, outcome)
-    return outcome
+    const outcome = {
+      ...pending,
+      memberId,
+      expectedPoolAddress: poolAddress,
+      network: resolvedNetwork,
+      policy,
+    }
+    try {
+      return recordServerVerifiedContribution(circleId, cycle, memberAddress, outcome, [])
+    } catch (err) {
+      return buildUnverifiedFromStorageOrConflictError(err)
+    }
   }
 
   const allTransfers = []
@@ -667,11 +1005,16 @@ export async function verifyMemberContributionOnSui(params, options = {}) {
       const outcome = {
         ...failedResult,
         txDigest: d,
-        network: tatumCfg?.SUI_NETWORK,
+        memberId,
+        expectedPoolAddress: poolAddress,
+        network: resolvedNetwork,
         policy,
       }
-      recordServerVerifiedContribution(circleId, cycle, memberAddress, outcome)
-      return outcome
+      try {
+        return recordServerVerifiedContribution(circleId, cycle, memberAddress, outcome, [])
+      } catch (err) {
+        return buildUnverifiedFromStorageOrConflictError(err, d)
+      }
     }
     allTransfers.push(...lookup.transfers)
   }
@@ -701,11 +1044,17 @@ export async function verifyMemberContributionOnSui(params, options = {}) {
 
   const outcome = {
     ...classified,
-    network: tatumCfg?.SUI_NETWORK,
+    memberId,
+    expectedPoolAddress: poolAddress,
+    network: resolvedNetwork,
     policy,
   }
-  recordServerVerifiedContribution(circleId, cycle, memberAddress, outcome)
-  return outcome
+  try {
+    return recordServerVerifiedContribution(circleId, cycle, memberAddress, outcome, allTransfers)
+  } catch (err) {
+    // CRITICAL: Never report a payment as Verified if persistence of its verification result fails
+    return buildUnverifiedFromStorageOrConflictError(err, outcome.txDigest)
+  }
 }
 
 /**

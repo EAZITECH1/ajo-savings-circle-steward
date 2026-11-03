@@ -28,10 +28,19 @@ A non-custodial rotating savings circle (Ajo / Esusu / ROSCA) steward built on *
    - `server/steward-llm.mjs` and `server/routes/tatum.mjs` never accept or fall back to browser-supplied `memories` or `verifications`.
    - The server recalls memories directly from Walrus Memory and reads contribution status strictly from server-verified Tatum transaction records (`getServerVerifiedContribution`). If Walrus Memory or Tatum is unavailable, the server reports the unavailable state explicitly rather than trusting client state.
 
-5. **Honest Persistence & Semantic Memory Boundaries**
-   - Per `AGENTS.md`, no local database or filesystem state store is added to the AI Builder preview.
-   - **Runtime-only server state**: Circle rosters (`circleRegistry`), wallet authentication sessions (`walletSessions`), pending unconfirmed proposals (`pendingProposals`), and submitted transaction digest lists (`submittedDigestsStore`) live in server memory (`Map`) only and must be re-registered after a server restart.
-   - **Walrus Mainnet semantic memory**: Confirmed memories are written to Walrus Mainnet via `@mysten-incubation/memwal` (`rememberAndWait`). Because Walrus Memory is an encrypted semantic vector store rather than a deterministic relational database, `POST /api/memory/restore` re-indexes missing on-chain blobs (bounded by `limit` and relayer candidate caps) and recalls recent memories semantically; it does not reconstruct circle rosters or payment ledger state.
+5. **Durable Server Persistence (`node:sqlite` + Walrus Mainnet Semantic Memory)**
+   - **Durable SQLite relational layer (`server/db.mjs`)**: Uses Node's built-in `node:sqlite` (`DatabaseSync`) with WAL journaling (`PRAGMA journal_mode = WAL`), foreign keys (`PRAGMA foreign_keys = ON`), and versioned schema migrations (`schema_migrations`, Migration `001_initial_durable_schema`).
+   - **Persisted tables & constraints**:
+     - `circles` & `circle_members`: Persists circle configuration and member rosters across restarts with `PRIMARY KEY (circle_id, member_id)` and `UNIQUE (circle_id, normalized_address)` to prevent duplicate memberships.
+     - `proposals` & `confirmation_challenges`: Persists proposal lifecycle (`pending`, `confirmed`, `rejected`, `proposal_hash`, `walrus_blob_id`, `confirmation_type`, `confirming_address`) and one-time confirmation nonces (`nonce PRIMARY KEY`, `consumed = 1`) so consumed nonces cannot be replayed across restarts.
+     - `wallet_auth_challenges` & `wallet_sessions`: Persists login challenge consumption (`consumed = 1`) and active sessions keyed by the **SHA-256 hash** (`token_hash`) of the bearer token. Raw bearer session tokens, private keys, API keys, and raw wallet signature bytes are **never** persisted to disk.
+     - `submitted_transactions` & `member_cycle_verifications`: Retains authoritative Tatum chain evidence (`network`, `tx_digest`, `observed_sender`, `observed_recipient`, `token_type`, `amount`, `execution_status`, `tx_timestamp_ms`, `verified_at_iso`) with `PRIMARY KEY (tx_digest, network)` to block conflicting transaction submissions across different members, circles, or cycles. If persistence fails during a database outage, `verifyMemberContributionOnSui` fails closed and returns `Unverified` (never `Verified`).
+     - `quarantined_records`: Persists the quarantine blocklist (`lagos-techies-seed-circle` and the 10 synthetic Walrus Mainnet blob IDs) across restarts.
+   - **Production database configuration**:
+     - **Local development**: Defaults to `.data/ajo-steward.sqlite` (gitignored), configurable via `SQLITE_DB_PATH`.
+     - **Single-node production / container deployment**: Mount a persistent volume with `0700` permissions (e.g. `/var/lib/ajo-steward`) and set `SQLITE_DB_PATH=/var/lib/ajo-steward/ajo-steward.sqlite`.
+     - **Multi-replica production deployment**: The relational schema in `server/db.mjs` (`001_initial_durable_schema`) uses standard ANSI SQL types (`TEXT`, `INTEGER`, `REAL`, `PRIMARY KEY`, `UNIQUE`, `FOREIGN KEY`) and explicit `withTransaction` boundaries so it can be pointed at a managed SQLite service (LiteFS / Turso / LibSQL) or migrated 1:1 to PostgreSQL (`pg`) using the same table definitions and constraints.
+   - **Walrus Mainnet semantic memory**: Confirmed memories are written to Walrus Mainnet via `@mysten-incubation/memwal` (`rememberAndWait`). `POST /api/memory/restore` re-indexes missing on-chain Walrus blobs and recalls recent memories semantically.
 
 ---
 
@@ -54,6 +63,7 @@ Copy `.env.example` to `.env` (gitignored) and populate the credentials for the 
 | Variable | Required For | Description |
 | :--- | :--- | :--- |
 | `PORT` | Optional (default `3000`) | Express + Vite server port |
+| `SQLITE_DB_PATH` | Optional (default `.data/ajo-steward.sqlite`) | Path to durable SQLite database file |
 | `TATUM_API_KEY` | Tatum Sui Verifier | Tatum API key (`x-api-key` header) |
 | `TATUM_API_BASE` | Tatum Sui Verifier | Tatum API base URL (e.g. `https://api.tatum.io`) |
 | `SUI_NETWORK` | Tatum Sui Verifier | `mainnet` or `testnet` |

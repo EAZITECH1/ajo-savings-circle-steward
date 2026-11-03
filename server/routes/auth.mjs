@@ -10,13 +10,19 @@ import {
 
 const router = Router()
 
+function mapAuthRouteStatus(err, fallback = 400) {
+  if (err instanceof WalletAuthError) return err.statusCode
+  if (err?.name === 'StorageUnavailableError') return 503
+  if (err?.name === 'StorageConflictError') return 409
+  return fallback
+}
+
 router.post('/challenge', (req, res) => {
   try {
     const challenge = issueWalletAuthChallenge(req.body || {})
     res.json(challenge)
   } catch (err) {
-    const status = err instanceof WalletAuthError ? err.statusCode : 400
-    res.status(status).json({ error: err.message })
+    res.status(mapAuthRouteStatus(err, 400)).json({ error: err.message })
   }
 })
 
@@ -25,29 +31,36 @@ router.post('/verify', async (req, res) => {
     const session = await verifyWalletAuthChallenge(req.body || {})
     res.json(session)
   } catch (err) {
-    const status = err instanceof WalletAuthError ? err.statusCode : 401
-    res.status(status).json({ error: err.message })
+    res.status(mapAuthRouteStatus(err, 401)).json({ error: err.message })
   }
 })
 
 router.get('/session', (req, res) => {
-  const token = extractSessionToken(req)
-  const session = getWalletSessionByToken(token)
-  if (!session) {
-    return res.json({ authenticated: false, walletAddress: null })
+  try {
+    const token = extractSessionToken(req)
+    const session = getWalletSessionByToken(token)
+    if (!session) {
+      return res.json({ authenticated: false, walletAddress: null })
+    }
+    res.json({
+      authenticated: true,
+      walletAddress: session.walletAddress,
+      authenticatedAt: session.authenticatedAt,
+      expiresAt: session.expiresAt,
+    })
+  } catch (err) {
+    res.status(mapAuthRouteStatus(err, 503)).json({ error: err.message })
   }
-  res.json({
-    authenticated: true,
-    walletAddress: session.walletAddress,
-    authenticatedAt: session.authenticatedAt,
-    expiresAt: session.expiresAt,
-  })
 })
 
 router.post('/logout', (req, res) => {
-  const token = extractSessionToken(req)
-  revokeWalletSession(token)
-  res.json({ loggedOut: true })
+  try {
+    const token = extractSessionToken(req)
+    revokeWalletSession(token)
+    res.json({ loggedOut: true })
+  } catch (err) {
+    res.status(mapAuthRouteStatus(err, 503)).json({ error: err.message })
+  }
 })
 
 export default router
