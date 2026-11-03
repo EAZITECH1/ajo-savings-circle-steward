@@ -14,6 +14,7 @@ import { fileURLToPath } from 'url'
 import path from 'path'
 import tatumRoutes from './routes/tatum.mjs'
 import { credentialGuard } from './credential-guard.mjs'
+import { loadDotEnvIfPresent, loadConfig } from './config.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const root = path.join(__dirname, '..')
@@ -23,12 +24,49 @@ const root = path.join(__dirname, '..')
 // globs — must see the project files, or it silently generates no utilities
 // (unstyled preview). `vite build` already runs from here; this makes dev match.
 process.chdir(root)
+loadDotEnvIfPresent(path.join(root, '.env'))
+
+// Validate tunable configuration at startup (fails fast if numeric tunables are malformed).
+const bootConfig = loadConfig()
 
 const app = express()
 app.use(express.json())
 
-// Redact the Tatum API key from every response before it leaves the process.
+// Redact all configured secrets from every response before it leaves the process.
 app.use(credentialGuard)
+
+// Non-secret integration status endpoint for the frontend.
+app.get('/api/config/status', (_req, res) => {
+  const current = loadConfig()
+  res.json({
+    tunables: current.tunables,
+    integrations: {
+      tatum: {
+        configured: current.integrations.tatum.configured,
+        status: current.integrations.tatum.status,
+        missingVars: current.integrations.tatum.missingVars,
+        issues: current.integrations.tatum.issues,
+        network: current.integrations.tatum.config?.SUI_NETWORK ?? null,
+        tokenType: current.integrations.tatum.config?.SUI_TOKEN_TYPE ?? null,
+        tokenDecimals: current.integrations.tatum.config?.SUI_TOKEN_DECIMALS ?? null,
+      },
+      memwal: {
+        configured: current.integrations.memwal.configured,
+        status: current.integrations.memwal.status,
+        missingVars: current.integrations.memwal.missingVars,
+        issues: current.integrations.memwal.issues,
+        namespacePrefix: current.integrations.memwal.config?.MEMWAL_NAMESPACE_PREFIX ?? null,
+      },
+      llm: {
+        configured: current.integrations.llm.configured,
+        status: current.integrations.llm.status,
+        missingVars: current.integrations.llm.missingVars,
+        issues: current.integrations.llm.issues,
+        model: current.integrations.llm.config?.LLM_MODEL ?? null,
+      },
+    },
+  })
+})
 
 app.use('/api/tatum', tatumRoutes)
 
@@ -55,7 +93,7 @@ const vite = await createViteServer({
 })
 app.use(vite.middlewares)
 
-const port = process.env.PORT ?? 3000
+const port = bootConfig.tunables.port
 server.listen(port, () => {
   console.log(`preview-sidecar listening on :${port}`)
 })

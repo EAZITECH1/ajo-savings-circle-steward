@@ -13,14 +13,14 @@
 // credential rewritten mid-session must be scrubbed against its new value, not
 // whatever was live when this module first loaded.
 import { credentialValues } from './credentials-store.mjs'
+import { configuredSecretValues } from './config.mjs'
 
 function scrub(body) {
-  // credentialValues() covers anything seeded/pushed into creds.json, but a
-  // credential can also reach this process directly via the environment
-  // (e.g. local dev exporting TATUM_API_KEY with no creds file mounted) —
-  // include it so that path is still redacted.
-  const secrets = [...credentialValues(), process.env.TATUM_API_KEY].filter(
-    (v) => typeof v === 'string' && v.length >= 12,
+  // credentialValues() covers anything seeded/pushed into creds.json, while
+  // configuredSecretValues() covers TATUM_API_KEY, MEMWAL_KEY, and LLM_API_KEY
+  // set via environment variables — include both so every secret path is redacted.
+  const secrets = [...credentialValues(), ...configuredSecretValues()].filter(
+    (v) => typeof v === 'string' && v.length >= 8,
   )
   if (!secrets.length || body == null) return body
   let text
