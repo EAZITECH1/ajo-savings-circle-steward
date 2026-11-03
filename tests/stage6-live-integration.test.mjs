@@ -54,9 +54,13 @@ test(
     assert.equal(status.connected, true, `Tatum Sui RPC failed: ${status.error || 'unknown error'}`)
     assert.ok(status.chainId)
 
+    const isTestnet = liveConfig.integrations.tatum.config?.SUI_NETWORK === 'testnet'
+    const sampleDigest = isTestnet
+      ? 'DVmz3KcNu1fenJ49fRzrJpQxaSPTe6bjKWvMaFDEs9x'
+      : '3jseEdb6UizBY9bfPVtR3GVDrbrfbsviThfL8fRSPTUa'
     const lookup = await lookupSuiTransactionViaTatum(
-      '3jseEdb6UizBY9bfPVtR3GVDrbrfbsviThfL8fRSPTUa',
-      '0x4483dd1b153465279d4483930b929e6709a5ed7815c1258733106a529ed284f8'
+      sampleDigest,
+      '0x921e2bd3432c784dce15b4073ba666d5067e6f8a41704eb63555235fec2e2e41'
     )
     assert.equal(lookup.lookupStatus, 'found', `Expected found, got ${lookup.lookupStatus}: ${lookup.lookupError}`)
     assert.ok(Array.isArray(lookup.transfers) && lookup.transfers.length > 0)
