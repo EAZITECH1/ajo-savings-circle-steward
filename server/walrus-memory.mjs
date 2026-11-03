@@ -8,6 +8,13 @@ import {
   isQuarantinedSyntheticRecord,
 } from './payment-policy.mjs'
 import { verifySuiAddressSignature, WalletAuthError } from './wallet-auth.mjs'
+import {
+  isValidSuiDigest,
+  recordSubmittedDigest,
+  verifyMemberContributionOnSui,
+  clearAllCircleSubmittedDigests,
+  TransactionConflictError,
+} from './sui-verifier.mjs'
 
 export {
   QUARANTINED_SYNTHETIC_CIRCLES,
@@ -16,6 +23,16 @@ export {
 }
 
 const META_MARKER = '\n[AJO_MEMORY_META]'
+const FORBIDDEN_SECRET_KEYS = [
+  'token',
+  'sessionToken',
+  'bearerToken',
+  'signature',
+  'rawSignature',
+  'privateKey',
+  'secretKey',
+  'challengeNonce',
+]
 
 /**
  * Runtime registry of active circles, proposals, and one-time confirmation challenges in memory.
@@ -151,6 +168,37 @@ export function computeProposalHash(proposal) {
 }
 
 /**
+ * Compute a deterministic SHA-256 hash of a circle's canonical configuration and minimal roster.
+ */
+export function computeCircleConfigHash(circleData) {
+  const membersCanonical = Array.isArray(circleData?.members)
+    ? circleData.members
+        .map((m, idx) => ({
+          id: String(m.id || `m${idx + 1}`).trim(),
+          name: String(m.name || '').trim(),
+          address: normalizeSuiAddress(m.address || ''),
+        }))
+        .sort((a, b) => a.id.localeCompare(b.id))
+    : []
+
+  const canonical = JSON.stringify({
+    circleId: String(circleData?.circleId || '').trim(),
+    circleName: String(circleData?.circleName || '').trim(),
+    poolAddress: normalizeSuiAddress(circleData?.poolAddress || ''),
+    contributionPerMember: Number(circleData?.contributionPerMember) || 0,
+    tokenType: String(circleData?.tokenType || '').trim(),
+    cycleLength: String(circleData?.cycleLength || 'Monthly').trim(),
+    currentCycle: Number(circleData?.currentCycle) || 1,
+    organizerAddress: normalizeSuiAddress(
+      circleData?.organizerAddress || membersCanonical[0]?.address || ''
+    ),
+    members: membersCanonical,
+  })
+
+  return crypto.createHash('sha256').update(canonical, 'utf8').digest('hex')
+}
+
+/**
  * Register or update a circle's configuration and member roster on the server
  * so membership & authorization checks can be enforced server-side.
  *
@@ -250,7 +298,7 @@ export function upsertCircleRoster(circleData, options = {}) {
     ? String(organizerAddress).trim()
     : normalizedMembers[0]?.address || ''
 
-  const record = {
+  const nextCore = {
     circleId: trimmedCircleId,
     circleName: circleName.trim(),
     poolAddress: String(poolAddress || '').trim(),
@@ -260,11 +308,61 @@ export function upsertCircleRoster(circleData, options = {}) {
     currentCycle: Number(currentCycle) || 1,
     members: normalizedMembers,
     organizerAddress: resolvedOrganizer,
+  }
+
+  const nextConfigHash = computeCircleConfigHash(nextCore)
+  const existingConfigHash = existing?.configHash || (existing ? computeCircleConfigHash(existing) : null)
+  const isChanged = Boolean(existing && existingConfigHash !== nextConfigHash)
+  const nextVersion = existing
+    ? isChanged
+      ? (Number(existing.version) || 1) + 1
+      : Number(existing.version) || 1
+    : Number(circleData.version) || 1
+  const previousConfigHash = isChanged
+    ? existingConfigHash
+    : existing?.previousConfigHash || circleData.previousConfigHash || null
+
+  const record = {
+    ...nextCore,
+    version: nextVersion,
+    configHash: nextConfigHash,
+    previousConfigHash,
+    walrusConfigBlobId: isChanged ? undefined : existing?.walrusConfigBlobId,
     updatedAt: new Date().toISOString(),
   }
 
   circleRegistry.set(record.circleId, record)
   return record
+}
+
+/**
+ * Clear all in-memory state for a specific circle (or all circles if omitted) to simulate a server restart
+ * or reset state before restoring from Walrus. Never touches walletSessions or consumed nonces.
+ */
+export function clearCircleRuntimeState(circleId, env = process.env) {
+  if (!circleId) {
+    for (const cid of Array.from(circleRegistry.keys())) {
+      clearAllCircleSubmittedDigests(cid)
+    }
+    circleRegistry.clear()
+    proposalsStore.clear()
+    sessionConfirmedCache.clear()
+    return
+  }
+  const trimmed = String(circleId).trim()
+  circleRegistry.delete(trimmed)
+  for (const [pid, prop] of Array.from(proposalsStore.entries())) {
+    if (prop.circleId === trimmed) {
+      proposalsStore.delete(pid)
+    }
+  }
+  try {
+    const ns = resolveCircleNamespace(trimmed, env)
+    sessionConfirmedCache.delete(ns)
+  } catch {
+    // ignore invalid circleId
+  }
+  clearAllCircleSubmittedDigests(trimmed)
 }
 
 export function getCircleRoster(circleId) {
@@ -342,11 +440,14 @@ export function serializeMemoryForWalrus(record) {
   const plainSentence = record.context || `${record.title}: ${record.quote}`
 
   const meta = {
-    schema: 'ajo-steward-memory/v1',
+    schema: 'ajo-steward-memory/v2',
+    recordKind: 'memory',
     id: record.id,
     circleId: record.circleId,
     memoryType,
     category,
+    version: Number(record.version) || 1,
+    previousProposalHash: record.previousProposalHash || undefined,
     title: record.title,
     sentence: plainSentence,
     quote: record.quote,
@@ -394,9 +495,17 @@ export function parseRecalledMemory(hit, fallbackCircleId = 'default') {
       const meta = JSON.parse(jsonPart)
       return {
         id: meta.id || `walrus-${hit.blob_id}`,
+        recordKind: meta.recordKind || (meta.memoryType === 'circle_config' ? 'circle_config' : meta.memoryType === 'tx_digest_association' ? 'tx_digest_association' : 'memory'),
         circleId: meta.circleId || fallbackCircleId,
         memoryType: meta.memoryType || categoryToMemoryType(meta.category),
         category: meta.category || memoryTypeToCategory(meta.memoryType),
+        version: Number(meta.version) || 1,
+        previousProposalHash: meta.previousProposalHash,
+        configHash: meta.configHash,
+        previousConfigHash: meta.previousConfigHash,
+        circleConfig: meta.circleConfig,
+        network: meta.network,
+        memberAddress: meta.memberAddress,
         title: meta.title || 'Recorded Circle Memory',
         quote: meta.quote || meta.sentence || '',
         context: meta.context || meta.sentence || '',
@@ -420,7 +529,7 @@ export function parseRecalledMemory(hit, fallbackCircleId = 'default') {
         memberIds: meta.memberIds || (meta.memberId ? [meta.memberId] : []),
         txDigest: meta.txDigest,
         distance: hit.distance,
-        createdAt: hit.created_at,
+        createdAt: hit.created_at || meta.createdAt || meta.updatedAt,
       }
     } catch {
       // Fall through to unstructured parser if metadata JSON was truncated
@@ -465,6 +574,429 @@ export function parseRecalledMemory(hit, fallbackCircleId = 'default') {
     walrusBlobId: hit.blob_id,
     distance: hit.distance,
     createdAt: hit.created_at,
+  }
+}
+
+/**
+ * Serialize a confirmed circle configuration & minimal member roster snapshot for Walrus Memory.
+ * Privacy invariant: only minimal roster fields (`id`, `name`, normalized `address`) and circle
+ * operational parameters are written. Session tokens, challenges, and raw signature bytes are never included.
+ */
+export function serializeCircleConfigForWalrus(circle, approvalMeta = {}) {
+  const version = Number(approvalMeta.version ?? circle.version) || 1
+  const minimalMembers = (circle.members || []).map((m, idx) => ({
+    id: String(m.id || `m${idx + 1}`).trim(),
+    name: String(m.name || '').trim(),
+    address: normalizeSuiAddress(m.address),
+  }))
+  const organizerAddress = normalizeSuiAddress(
+    circle.organizerAddress || minimalMembers[0]?.address || ''
+  )
+  const circleConfig = {
+    circleId: String(circle.circleId).trim(),
+    circleName: String(circle.circleName).trim(),
+    poolAddress: normalizeSuiAddress(circle.poolAddress),
+    contributionPerMember: Number(circle.contributionPerMember) || 0,
+    tokenType: String(circle.tokenType).trim(),
+    cycleLength: String(circle.cycleLength || 'Monthly').trim(),
+    currentCycle: Number(circle.currentCycle) || 1,
+    organizerAddress,
+    members: minimalMembers,
+  }
+  const configHash = computeCircleConfigHash(circleConfig)
+  const previousConfigHash =
+    approvalMeta.previousConfigHash !== undefined
+      ? approvalMeta.previousConfigHash
+      : circle.previousConfigHash || null
+
+  const confirmationType = approvalMeta.confirmationType || 'organizer_entered'
+  const confirmingAddress = normalizeSuiAddress(
+    approvalMeta.confirmingAddress || organizerAddress
+  )
+  const confirmedBy =
+    approvalMeta.confirmedBy ||
+    `Organizer-entered setup by ${confirmingAddress} — organizer entry only, not member-signed consensus`
+
+  const meta = {
+    schema: 'ajo-steward-memory/v2',
+    recordKind: 'circle_config',
+    memoryType: 'circle_config',
+    category: 'Agreements',
+    id: approvalMeta.id || `cfg-${circleConfig.circleId}-v${version}`,
+    circleId: circleConfig.circleId,
+    version,
+    configHash,
+    previousConfigHash,
+    circleConfig,
+    title: `Circle Configuration v${version}: ${circleConfig.circleName}`,
+    quote: `Pool ${circleConfig.poolAddress} | ${circleConfig.contributionPerMember} ${circleConfig.tokenType} (${circleConfig.cycleLength}, Cycle ${circleConfig.currentCycle}) | ${minimalMembers.length} members`,
+    context: `Confirmed circle configuration and roster snapshot v${version} for ${circleConfig.circleName} (${circleConfig.circleId}).`,
+    cycle: circleConfig.currentCycle,
+    confirmedBy,
+    confirmedByList: Array.isArray(approvalMeta.confirmedByList)
+      ? approvalMeta.confirmedByList
+      : [confirmedBy],
+    confirmationType,
+    confirmingAddress,
+    proposalId: approvalMeta.proposalId || undefined,
+    proposalHash: approvalMeta.proposalHash || configHash,
+    updatedAt: approvalMeta.updatedAt || circle.updatedAt || new Date().toISOString(),
+  }
+
+  const naturalText = [
+    `[Circle: ${circleConfig.circleId}] [Type: circle_config] [Version: ${version}] [Cycle ${circleConfig.currentCycle}]`,
+    `Title: ${meta.title}`,
+    `Summary: ${meta.context}`,
+    `Pool: ${circleConfig.poolAddress} | Contribution: ${circleConfig.contributionPerMember} ${circleConfig.tokenType} | CycleLength: ${circleConfig.cycleLength}`,
+    `Roster Members: ${minimalMembers.map((m) => `${m.id}:${m.name}(${m.address})`).join(', ')}`,
+    `Confirmation: ${confirmedBy}`,
+  ].join('\n')
+
+  return `${naturalText}${META_MARKER}${JSON.stringify(meta)}`
+}
+
+/**
+ * Serialize a confirmed transaction digest association for Walrus Memory.
+ * Invariant: A digest association records ONLY that a digest was submitted for `(circleId, cycle, memberId, memberAddress)`
+ * on `network`. It is NEVER treated as verified payment evidence until Tatum confirms the on-chain transaction.
+ */
+export function serializeTxDigestAssociationForWalrus(assoc, approvalMeta = {}) {
+  const circleId = String(assoc.circleId || '').trim()
+  const cycle = Number(assoc.cycle) || 1
+  const memberId = String(assoc.memberId || '').trim()
+  const memberAddress = normalizeSuiAddress(assoc.memberAddress || '')
+  const txDigest = String(assoc.txDigest || '').trim()
+  const network = String(assoc.network || 'testnet').trim()
+  const version = Number(assoc.version) || 1
+  const confirmingAddress = normalizeSuiAddress(
+    approvalMeta.confirmingAddress || memberAddress
+  )
+  const confirmationType =
+    approvalMeta.confirmationType || 'member_submitted_digest'
+  const confirmedBy =
+    approvalMeta.confirmedBy ||
+    `Digest association recorded by ${confirmingAddress} — unverified until Tatum confirms on Sui ${network}`
+
+  const meta = {
+    schema: 'ajo-steward-memory/v2',
+    recordKind: 'tx_digest_association',
+    memoryType: 'tx_digest_association',
+    category: 'Member patterns',
+    id: approvalMeta.id || `txassoc-${circleId}-${cycle}-${txDigest}`,
+    circleId,
+    cycle,
+    memberId,
+    memberAddress,
+    txDigest,
+    network,
+    version,
+    title: `Submitted Tx Digest Association (${txDigest.slice(0, 10)}...)`,
+    quote: `Member ${memberId} (${memberAddress}) associated Sui ${network} digest ${txDigest} with cycle ${cycle}. Requires live Tatum re-verification.`,
+    context: `Submitted transaction digest association for ${memberId} in cycle ${cycle} on Sui ${network}.`,
+    confirmedBy,
+    confirmedByList: [confirmedBy],
+    confirmationType,
+    confirmingAddress,
+    proposalHash: approvalMeta.proposalHash || undefined,
+    createdAt: approvalMeta.createdAt || new Date().toISOString(),
+  }
+
+  const naturalText = [
+    `[Circle: ${circleId}] [Type: tx_digest_association] [Cycle ${cycle}] [Network: ${network}]`,
+    `Title: ${meta.title}`,
+    `Summary: ${meta.context}`,
+    `Source quote: "${meta.quote}"`,
+    `Members: ${memberId}`,
+    `Submitted Tx Digest: ${txDigest}`,
+    `Confirmation: ${confirmedBy}`,
+  ].join('\n')
+
+  return `${naturalText}${META_MARKER}${JSON.stringify(meta)}`
+}
+
+function isValidNormalizedSuiAddress(addr) {
+  if (typeof addr !== 'string' || !addr.trim()) return false
+  const norm = normalizeSuiAddress(addr)
+  return /^0x[0-9a-f]{64}$/.test(norm)
+}
+
+/**
+ * Validate a recalled Walrus blob hit (`{ blob_id, text, created_at, distance }`) for circle recovery.
+ * Rejects missing/corrupt metadata JSON, forbidden secret fields, circleId mismatches, invalid addresses/digests,
+ * or invalid approval metadata.
+ */
+export function validateWalrusRecordForRestore(hit, expectedCircleId) {
+  const blobId = String(hit?.blob_id || '').trim()
+  const rawText = String(hit?.text || '')
+  if (!blobId) {
+    return { valid: false, error: 'Missing Walrus blob_id on recalled hit.' }
+  }
+  const markerIdx = rawText.lastIndexOf(META_MARKER)
+  if (markerIdx === -1) {
+    return {
+      valid: false,
+      error: 'Missing structured [AJO_MEMORY_META] envelope; unstructured text cannot be trusted for state reconstruction.',
+    }
+  }
+
+  let meta
+  try {
+    meta = JSON.parse(rawText.slice(markerIdx + META_MARKER.length).trim())
+  } catch {
+    return {
+      valid: false,
+      error: 'Corrupt or truncated [AJO_MEMORY_META] JSON payload.',
+    }
+  }
+
+  if (!meta || typeof meta !== 'object') {
+    return { valid: false, error: 'Metadata payload is not a JSON object.' }
+  }
+
+  // Ensure no bearer tokens, session tokens, or raw wallet signatures were embedded in the record
+  for (const forbiddenKey of FORBIDDEN_SECRET_KEYS) {
+    if (meta[forbiddenKey] !== undefined && meta[forbiddenKey] !== null) {
+      return {
+        valid: false,
+        error: `Record contains forbidden sensitive field "${forbiddenKey}".`,
+      }
+    }
+  }
+
+  if (
+    meta.schema !== 'ajo-steward-memory/v1' &&
+    meta.schema !== 'ajo-steward-memory/v2'
+  ) {
+    return {
+      valid: false,
+      error: `Unsupported record schema "${String(meta.schema || 'unknown')}".`,
+    }
+  }
+
+  const recordCircleId = String(meta.circleId || '').trim()
+  if (!recordCircleId || recordCircleId !== String(expectedCircleId).trim()) {
+    return {
+      valid: false,
+      error: `Circle ID mismatch: record belongs to "${recordCircleId || 'unknown'}", expected "${expectedCircleId}".`,
+    }
+  }
+
+  if (
+    meta.confirmingAddress !== undefined &&
+    meta.confirmingAddress !== null &&
+    !isValidNormalizedSuiAddress(meta.confirmingAddress)
+  ) {
+    return {
+      valid: false,
+      error: `Invalid confirmingAddress "${meta.confirmingAddress}" in approval metadata.`,
+    }
+  }
+
+  const confirmedByStr = String(meta.confirmedBy || '').trim()
+  if (!confirmedByStr) {
+    return {
+      valid: false,
+      error: 'Missing confirmedBy approval metadata.',
+    }
+  }
+
+  const recordKind =
+    meta.recordKind ||
+    (meta.memoryType === 'circle_config'
+      ? 'circle_config'
+      : meta.memoryType === 'tx_digest_association'
+      ? 'tx_digest_association'
+      : 'memory')
+
+  if (recordKind === 'circle_config') {
+    const cfg = meta.circleConfig
+    if (!cfg || typeof cfg !== 'object') {
+      return {
+        valid: false,
+        error: 'circle_config record is missing circleConfig object.',
+        missingFields: ['circleConfig'],
+      }
+    }
+    const missingFields = []
+    if (!cfg.circleId || String(cfg.circleId).trim() !== recordCircleId) {
+      missingFields.push('circleId')
+    }
+    if (!cfg.circleName || !String(cfg.circleName).trim()) {
+      missingFields.push('circleName')
+    }
+    if (!isValidNormalizedSuiAddress(cfg.poolAddress)) {
+      missingFields.push('poolAddress')
+    }
+    if (!cfg.tokenType || !String(cfg.tokenType).trim()) {
+      missingFields.push('tokenType')
+    }
+    if (!(Number(cfg.contributionPerMember) > 0)) {
+      missingFields.push('contributionPerMember')
+    }
+    if (!cfg.cycleLength || !String(cfg.cycleLength).trim()) {
+      missingFields.push('cycleLength')
+    }
+    if (!(Number(cfg.currentCycle) >= 1)) {
+      missingFields.push('currentCycle')
+    }
+    if (!isValidNormalizedSuiAddress(cfg.organizerAddress)) {
+      missingFields.push('organizerAddress')
+    }
+    if (!Array.isArray(cfg.members) || cfg.members.length === 0) {
+      missingFields.push('members')
+    }
+
+    if (missingFields.length > 0) {
+      return {
+        valid: false,
+        error: `Incomplete circle_config record: missing or invalid fields (${missingFields.join(', ')}).`,
+        missingFields,
+      }
+    }
+
+    const seenIds = new Set()
+    const seenAddrs = new Set()
+    const normalizedMembers = []
+    for (const m of cfg.members) {
+      const mid = String(m?.id || '').trim()
+      const mname = String(m?.name || '').trim()
+      if (!mid || !mname || !isValidNormalizedSuiAddress(m?.address)) {
+        return {
+          valid: false,
+          error: `Malformed member entry (${mid || 'unknown'}) in circle_config roster.`,
+          missingFields: ['members'],
+        }
+      }
+      const normAddr = normalizeSuiAddress(m.address)
+      if (seenIds.has(mid) || seenAddrs.has(normAddr)) {
+        return {
+          valid: false,
+          error: `Duplicate member ID ("${mid}") or wallet address ("${normAddr}") in circle_config roster.`,
+        }
+      }
+      seenIds.add(mid)
+      seenAddrs.add(normAddr)
+      normalizedMembers.push({
+        id: mid,
+        name: mname,
+        address: normAddr,
+        avatarColor: 'bg-utility-brand-50 text-utility-brand-700',
+      })
+    }
+
+    const normalizedConfig = {
+      circleId: recordCircleId,
+      circleName: String(cfg.circleName).trim(),
+      poolAddress: normalizeSuiAddress(cfg.poolAddress),
+      contributionPerMember: Number(cfg.contributionPerMember),
+      tokenType: String(cfg.tokenType).trim(),
+      cycleLength: String(cfg.cycleLength).trim(),
+      currentCycle: Number(cfg.currentCycle),
+      organizerAddress: normalizeSuiAddress(cfg.organizerAddress),
+      members: normalizedMembers,
+    }
+
+    const computedHash = computeCircleConfigHash(normalizedConfig)
+    if (meta.configHash && meta.configHash !== computedHash) {
+      return {
+        valid: false,
+        error: `circle_config integrity check failed: computed configHash (${computedHash}) does not match recorded configHash (${meta.configHash}).`,
+      }
+    }
+
+    const version = Number(meta.version)
+    if (!Number.isInteger(version) || version < 1) {
+      return {
+        valid: false,
+        error: `Invalid circle_config version "${meta.version}".`,
+      }
+    }
+
+    return {
+      valid: true,
+      recordKind: 'circle_config',
+      blobId,
+      version,
+      configHash: computedHash,
+      previousConfigHash: meta.previousConfigHash || null,
+      circleConfig: normalizedConfig,
+      confirmedBy: confirmedByStr,
+      confirmationType: meta.confirmationType || 'organizer_entered',
+      confirmingAddress: meta.confirmingAddress
+        ? normalizeSuiAddress(meta.confirmingAddress)
+        : normalizedConfig.organizerAddress,
+      updatedAt: meta.updatedAt || hit.created_at || new Date().toISOString(),
+    }
+  }
+
+  if (recordKind === 'tx_digest_association') {
+    const missingFields = []
+    const txDigest = String(meta.txDigest || '').trim()
+    const network = String(meta.network || '').trim()
+    const memberId = String(meta.memberId || '').trim()
+    const cycle = Number(meta.cycle)
+
+    if (!isValidSuiDigest(txDigest)) missingFields.push('txDigest')
+    if (network !== 'testnet' && network !== 'mainnet') missingFields.push('network')
+    if (!memberId) missingFields.push('memberId')
+    if (!isValidNormalizedSuiAddress(meta.memberAddress)) missingFields.push('memberAddress')
+    if (!Number.isInteger(cycle) || cycle < 1) missingFields.push('cycle')
+
+    if (missingFields.length > 0) {
+      return {
+        valid: false,
+        error: `Malformed tx_digest_association record: invalid or missing (${missingFields.join(', ')}).`,
+        missingFields,
+      }
+    }
+
+    return {
+      valid: true,
+      recordKind: 'tx_digest_association',
+      blobId,
+      id: meta.id || `txassoc-${recordCircleId}-${cycle}-${txDigest}`,
+      circleId: recordCircleId,
+      cycle,
+      memberId,
+      memberAddress: normalizeSuiAddress(meta.memberAddress),
+      txDigest,
+      network,
+      version: Number(meta.version) || 1,
+      confirmedBy: confirmedByStr,
+      confirmationType: meta.confirmationType || 'member_submitted_digest',
+      confirmingAddress: meta.confirmingAddress
+        ? normalizeSuiAddress(meta.confirmingAddress)
+        : normalizeSuiAddress(meta.memberAddress),
+      createdAt: meta.createdAt || hit.created_at || new Date().toISOString(),
+    }
+  }
+
+  // Standard confirmed group memory (`agreement`, `member_pattern`, `reminder_preference`, `verified_payment_event`)
+  const title = String(meta.title || '').trim()
+  const quote = String(meta.quote || meta.sentence || '').trim()
+  const cycle = Number(meta.cycle) || 1
+  if (!title || !quote) {
+    return {
+      valid: false,
+      error: 'Memory record is missing required title or quote.',
+      missingFields: [!title ? 'title' : null, !quote ? 'quote' : null].filter(Boolean),
+    }
+  }
+  if (meta.txDigest && !isValidSuiDigest(String(meta.txDigest))) {
+    return {
+      valid: false,
+      error: `Memory record contains malformed txDigest "${meta.txDigest}".`,
+    }
+  }
+
+  const parsedMemory = parseRecalledMemory(hit, expectedCircleId)
+  return {
+    valid: true,
+    recordKind: 'memory',
+    blobId,
+    version: Number(meta.version) || 1,
+    previousProposalHash: meta.previousProposalHash || null,
+    record: parsedMemory,
   }
 }
 
@@ -868,6 +1400,261 @@ export async function confirmAndWriteMemory(input, env = process.env) {
 }
 
 /**
+ * Persist a circle's confirmed configuration and minimal member roster to Walrus Memory.
+ * Distinguishes organizer-signed/entered initial setup from member-signed configuration changes,
+ * and never represents a single signature as full group consensus.
+ */
+export async function persistCircleConfigToWalrus(input, env = process.env) {
+  const {
+    circleId,
+    memberId,
+    memberAddress,
+    signature,
+    challengeNonce,
+    publicKeyHex,
+    proposalId,
+    memwalClientOverride,
+  } = input || {}
+
+  if (!circleId) {
+    throw new Error('circleId is required to persist circle configuration to Walrus.')
+  }
+  assertCircleNotQuarantined(circleId)
+
+  const { circle, member } = verifyCircleMembership(circleId, { memberId, memberAddress })
+  const normalizedMemberAddr = normalizeSuiAddress(member.address)
+  const isOrganizer = normalizedMemberAddr === normalizeSuiAddress(circle.organizerAddress)
+
+  const wantsSignature = Boolean(signature || challengeNonce || publicKeyHex)
+  let confirmationType = 'organizer_entered'
+  let confirmedByLabel = `Organizer-entered setup by ${member.name} (${normalizedMemberAddr}) — organizer entry only, not member-signed consensus`
+
+  if (wantsSignature) {
+    if (!challengeNonce || !signature || !proposalId) {
+      throw new WalletAuthError(
+        'proposalId, challengeNonce, and wallet signature are required for signed circle configuration persistence.',
+        400
+      )
+    }
+    const trimmedNonce = String(challengeNonce).trim()
+    if (consumedChallengeNonces.has(trimmedNonce)) {
+      throw new WalletAuthError('Invalid or already-consumed confirmation challenge nonce.', 401)
+    }
+    const challenge = authChallenges.get(trimmedNonce)
+    authChallenges.delete(trimmedNonce)
+    consumedChallengeNonces.add(trimmedNonce)
+
+    if (!challenge || Date.now() > challenge.expiresAtMs) {
+      throw new WalletAuthError('Invalid or expired confirmation challenge nonce.', 401)
+    }
+    if (
+      challenge.circleId !== circle.circleId ||
+      challenge.proposalId !== String(proposalId).trim() ||
+      challenge.memberId !== member.id ||
+      normalizeSuiAddress(challenge.memberAddress) !== normalizedMemberAddr
+    ) {
+      throw new WalletAuthError(
+        'Confirmation challenge does not match circleId, proposalId, or confirming member wallet.',
+        403
+      )
+    }
+
+    await verifySuiAddressSignature({
+      message: challenge.message,
+      expectedAddress: member.address,
+      signature,
+      publicKeyHex,
+    })
+
+    if (isOrganizer && (Number(circle.version) || 1) === 1) {
+      confirmationType = 'organizer_signed_setup'
+      confirmedByLabel = `Organizer-signed setup by ${member.name} (${normalizedMemberAddr}) — 1 organizer wallet signature, not multi-member group consensus`
+    } else {
+      confirmationType = 'wallet_signature_verified'
+      confirmedByLabel = `Member-signed configuration change by ${member.name} (${normalizedMemberAddr}) — 1 wallet signature, not full group consensus`
+    }
+  } else {
+    if (!isOrganizer) {
+      throw new WalletAuthError(
+        `Only the circle organizer (${circle.organizerAddress}) may persist an organizer-entered circle configuration without a proposal-bound wallet signature.`,
+        403
+      )
+    }
+    if ((Number(circle.version) || 1) > 1) {
+      confirmedByLabel = `Organizer-entered configuration update v${circle.version} by ${member.name} (${normalizedMemberAddr}) — organizer entry only, not member-signed consensus`
+    }
+  }
+
+  const { client, namespace, tunables } = memwalClientOverride
+    ? {
+        client: memwalClientOverride,
+        namespace: resolveCircleNamespace(circle.circleId, env),
+        tunables: loadConfig(env).tunables,
+      }
+    : createMemWalClient(circle.circleId, env)
+
+  try {
+    const version = Number(circle.version) || 1
+    const configHash = circle.configHash || computeCircleConfigHash(circle)
+    const serialized = serializeCircleConfigForWalrus(circle, {
+      version,
+      previousConfigHash: circle.previousConfigHash || null,
+      confirmationType,
+      confirmingAddress: normalizedMemberAddr,
+      confirmedBy: confirmedByLabel,
+      proposalId: proposalId || undefined,
+      proposalHash: configHash,
+    })
+
+    const rememberResult = await client.rememberAndWait(serialized, namespace, {
+      pollIntervalMs: tunables.pollingIntervalMs,
+      timeoutMs: Math.max(tunables.requestTimeoutMs * 4, 90000),
+      idempotencyKey: `${circle.circleId}:circle_config:v${version}:${configHash}`,
+      dedupe: true,
+    })
+
+    if (!rememberResult || !rememberResult.blob_id) {
+      throw new Error('Walrus Memory write for circle_config completed without returning a valid blob_id.')
+    }
+
+    const updatedCircle = {
+      ...circle,
+      version,
+      configHash,
+      walrusConfigBlobId: rememberResult.blob_id,
+      updatedAt: new Date().toISOString(),
+    }
+    circleRegistry.set(circle.circleId, updatedCircle)
+
+    return {
+      circle: updatedCircle,
+      walrusBlobId: rememberResult.blob_id,
+      namespace: rememberResult.namespace || namespace,
+      version,
+      configHash,
+      confirmationType,
+      confirmedBy: confirmedByLabel,
+    }
+  } finally {
+    if (typeof client.destroy === 'function') {
+      client.destroy()
+    }
+  }
+}
+
+/**
+ * Persist a confirmed transaction digest association (`network, txDigest, circleId, cycle, memberId, memberAddress`)
+ * to Walrus Memory so digest associations survive server restarts.
+ * Never treats the digest as verified until Tatum confirms the on-chain transaction.
+ */
+export async function persistTxDigestAssociationToWalrus(input, env = process.env) {
+  const {
+    circleId,
+    cycle,
+    memberId,
+    memberAddress,
+    txDigest,
+    network,
+    authenticatedWalletAddress,
+    memwalClientOverride,
+  } = input || {}
+
+  if (!circleId) {
+    throw new Error('circleId is required to persist a transaction digest association.')
+  }
+  assertCircleNotQuarantined(circleId)
+
+  const { circle, member: actorMember } = verifyCircleMembership(circleId, {
+    memberAddress: authenticatedWalletAddress || memberAddress,
+  })
+
+  const targetMember = circle.members.find((m) => {
+    if (memberId && m.id === memberId) return true
+    if (memberAddress && normalizeSuiAddress(m.address) === normalizeSuiAddress(memberAddress)) {
+      return true
+    }
+    return false
+  }) || actorMember
+
+  const trimmedDigest = String(txDigest || '').trim()
+  if (!isValidSuiDigest(trimmedDigest)) {
+    throw new WalletAuthError(
+      `Invalid Sui transaction digest "${trimmedDigest}". Must be a valid Base58 digest.`,
+      400
+    )
+  }
+
+  const resolvedCycle = Number(cycle) || circle.currentCycle || 1
+  const resolvedNetwork = String(
+    network || loadConfig(env).integrations.tatum.config?.SUI_NETWORK || env.SUI_NETWORK || 'testnet'
+  ).trim()
+
+  // Enforce conflict check and record unverified digest association in server memory
+  recordSubmittedDigest(circle.circleId, resolvedCycle, targetMember.address, trimmedDigest, {
+    network: resolvedNetwork,
+    poolAddress: circle.poolAddress,
+    memberId: targetMember.id,
+  })
+
+  const confirmingAddr = normalizeSuiAddress(actorMember.address)
+  const confirmedByLabel = `Digest association recorded by ${actorMember.name} (${confirmingAddr}) for ${targetMember.name} — unverified until Tatum confirms on Sui ${resolvedNetwork}`
+
+  const { client, namespace, tunables } = memwalClientOverride
+    ? {
+        client: memwalClientOverride,
+        namespace: resolveCircleNamespace(circle.circleId, env),
+        tunables: loadConfig(env).tunables,
+      }
+    : createMemWalClient(circle.circleId, env)
+
+  try {
+    const serialized = serializeTxDigestAssociationForWalrus(
+      {
+        circleId: circle.circleId,
+        cycle: resolvedCycle,
+        memberId: targetMember.id,
+        memberAddress: targetMember.address,
+        txDigest: trimmedDigest,
+        network: resolvedNetwork,
+      },
+      {
+        confirmationType: 'member_submitted_digest',
+        confirmingAddress: confirmingAddr,
+        confirmedBy: confirmedByLabel,
+      }
+    )
+
+    const rememberResult = await client.rememberAndWait(serialized, namespace, {
+      pollIntervalMs: tunables.pollingIntervalMs,
+      timeoutMs: Math.max(tunables.requestTimeoutMs * 4, 90000),
+      idempotencyKey: `${circle.circleId}:txassoc:${resolvedNetwork}:${resolvedCycle}:${normalizeSuiAddress(targetMember.address)}:${trimmedDigest}`,
+      dedupe: true,
+    })
+
+    if (!rememberResult || !rememberResult.blob_id) {
+      throw new Error('Walrus Memory write for tx_digest_association completed without returning a valid blob_id.')
+    }
+
+    return {
+      circleId: circle.circleId,
+      cycle: resolvedCycle,
+      memberId: targetMember.id,
+      memberAddress: normalizeSuiAddress(targetMember.address),
+      txDigest: trimmedDigest,
+      network: resolvedNetwork,
+      walrusBlobId: rememberResult.blob_id,
+      namespace: rememberResult.namespace || namespace,
+      verifiedOnChain: false,
+      confirmedBy: confirmedByLabel,
+    }
+  } finally {
+    if (typeof client.destroy === 'function') {
+      client.destroy()
+    }
+  }
+}
+
+/**
  * Semantic recall against the circle's Walrus Memory namespace.
  * Automatically excludes quarantined synthetic blobs unless `options.includeQuarantinedForAudit === true`.
  */
@@ -876,7 +1663,13 @@ export async function recallCircleMemories(circleId, query, options = {}, env = 
     assertCircleNotQuarantined(circleId)
   }
 
-  const { client, namespace, tunables } = createMemWalClient(circleId, env)
+  const { client, namespace, tunables } = options.memwalClientOverride
+    ? {
+        client: options.memwalClientOverride,
+        namespace: resolveCircleNamespace(circleId, env),
+        tunables: loadConfig(env).tunables,
+      }
+    : createMemWalClient(circleId, env)
   try {
     const searchQuery =
       query && query.trim()
@@ -896,6 +1689,15 @@ export async function recallCircleMemories(circleId, query, options = {}, env = 
       .map((hit) => parseRecalledMemory(hit, circleId))
       .filter((rec) => {
         if (!options.includeQuarantinedForAudit && isQuarantinedSyntheticRecord(rec)) {
+          return false
+        }
+        if (
+          !options.includeInternalRecords &&
+          (rec.recordKind === 'circle_config' ||
+            rec.recordKind === 'tx_digest_association' ||
+            rec.memoryType === 'circle_config' ||
+            rec.memoryType === 'tx_digest_association')
+        ) {
           return false
         }
         if (options.category && rec.category !== options.category) return false
@@ -928,7 +1730,9 @@ export async function recallCircleMemories(circleId, query, options = {}, env = 
       records,
     }
   } finally {
-    client.destroy()
+    if (typeof client.destroy === 'function') {
+      client.destroy()
+    }
   }
 }
 
@@ -950,7 +1754,11 @@ export async function listCircleMemories(circleId, env = process.env) {
   const nsCache = sessionConfirmedCache.get(namespace)
   if (nsCache) {
     for (const [blobId, rec] of nsCache.entries()) {
-      if (!isQuarantinedSyntheticRecord(rec)) {
+      if (
+        !isQuarantinedSyntheticRecord(rec) &&
+        rec.recordKind !== 'circle_config' &&
+        rec.recordKind !== 'tx_digest_association'
+      ) {
         byBlob.set(blobId, rec)
       }
     }
@@ -968,10 +1776,725 @@ export async function listCircleMemories(circleId, env = process.env) {
 }
 
 /**
- * Trigger Walrus Memory `restore(namespace, limit)` to re-index missing on-chain Walrus blobs
- * for this circle's namespace, then recall recent memories from the restored index.
+ * Full restart-recovery workflow for a circle from Walrus Memory + Tatum Sui re-verification.
+ *
+ * Supported MemWal retrieval operations used:
+ * 1. `client.restore(namespace, limit)` — re-indexes missing on-chain Walrus blobs into the relayer vector index.
+ * 2. `client.listMemories({ namespace, cursor, limit })` — walks the paginated metadata inventory (`has_more`, `next_cursor`)
+ *    to discover every `blob_id` stored in `namespace` without relying on semantic similarity to count blobs.
+ * 3. `client.recall({ query, limit, namespace, sort: 'recent' })` — executes targeted semantic queries across
+ *    `circle_config`, `agreement`/`member_pattern`/`reminder_preference`, and `tx_digest_association` records
+ *    to download and SEAL-decrypt the plaintext payloads.
+ *
+ * Completeness & Safety Guarantees:
+ * - Never claims `complete: true` unless a valid `circle_config` is present, every non-quarantined `blob_id` from
+ *   `listMemories` was recovered and validated, `restoreResult.truncated === false`, `restoreResult.failed === 0`,
+ *   `droppedCount === 0`, `malformedRecords.length === 0`, and `conflicts.length === 0`.
+ * - Never silently picks between conflicting `circle_config` versions, conflicting policies, or conflicting
+ *   `tx_digest_association` claims; surfaces all conflicts in `conflicts`.
+ * - Re-queries Tatum (`verifyMemberContributionOnSui`) for every restored transaction digest association;
+ *   never treats a restored digest as `Verified` unless Tatum confirms the on-chain transfer.
  */
-export async function restoreCircleMemoriesFromWalrus(circleId, limit, env = process.env) {
+export async function restoreCircleFromWalrus(circleId, options = {}, env = process.env) {
+  if (!circleId || typeof circleId !== 'string') {
+    throw new Error('circleId is required to restore a circle from Walrus.')
+  }
+  const trimmedCircleId = circleId.trim()
+  assertCircleNotQuarantined(trimmedCircleId)
+
+  const requestingWalletAddress = options.authenticatedWalletAddress
+    ? normalizeSuiAddress(options.authenticatedWalletAddress)
+    : ''
+  if (!requestingWalletAddress) {
+    throw new WalletAuthError(
+      'Authenticated wallet session is required to restore a circle from Walrus.',
+      401
+    )
+  }
+
+  const { client, namespace, tunables } = options.memwalClientOverride
+    ? {
+        client: options.memwalClientOverride,
+        namespace: resolveCircleNamespace(trimmedCircleId, env),
+        tunables: loadConfig(env).tunables,
+      }
+    : createMemWalClient(trimmedCircleId, env)
+
+  try {
+    const inspectLimit = Math.min(Math.max(Number(options.limit) || tunables.recallLimit || 25, 10), 100)
+
+    // Step 1: Trigger relayer restore(namespace, inspectLimit)
+    const rawRestoreRes = await client.restore(namespace, inspectLimit)
+    const restoreResult = {
+      restored: Number(rawRestoreRes?.restored) || 0,
+      skipped: Number(rawRestoreRes?.skipped) || 0,
+      failed: Number(rawRestoreRes?.failed) || 0,
+      total: Number(rawRestoreRes?.total) || 0,
+      namespace: rawRestoreRes?.namespace || namespace,
+      owner: rawRestoreRes?.owner || '',
+      truncated: Boolean(rawRestoreRes?.truncated),
+    }
+
+    const quarantinedRecordsSkipped = []
+    const expectedBlobIds = new Set()
+    let inventoryWalked = false
+    let inventoryPaginationTruncated = false
+
+    // Step 2: Walk listMemories({ namespace, cursor, limit: 500 }) for authoritative blob_id inventory
+    if (typeof client.listMemories === 'function') {
+      inventoryWalked = true
+      let cursor = undefined
+      let hasMore = true
+      let pages = 0
+      const MAX_PAGES = 20
+      while (hasMore && pages < MAX_PAGES) {
+        pages++
+        const page = await client.listMemories({
+          namespace,
+          cursor,
+          limit: 500,
+        })
+        const items = Array.isArray(page?.memories) ? page.memories : []
+        for (const item of items) {
+          if (item?.namespace_id && item.namespace_id !== namespace) continue
+          const bid = String(item?.blob_id || '').trim()
+          if (!bid) continue
+          if (QUARANTINED_SYNTHETIC_BLOB_IDS.has(bid)) {
+            quarantinedRecordsSkipped.push({
+              blobId: bid,
+              reason: 'Quarantined synthetic Walrus blob ID in namespace inventory.',
+            })
+            continue
+          }
+          expectedBlobIds.add(bid)
+        }
+        hasMore = Boolean(page?.has_more)
+        cursor = page?.next_cursor ?? undefined
+        if (hasMore && !cursor) {
+          inventoryPaginationTruncated = true
+          break
+        }
+      }
+      if (hasMore) {
+        inventoryPaginationTruncated = true
+      }
+    }
+
+    // Step 3: Targeted multi-query semantic recall to retrieve decrypted record texts
+    const recallQueries = [
+      `[Circle: ${trimmedCircleId}] [Type: circle_config] circle configuration roster members poolAddress tokenType contributionPerMember cycleLength currentCycle`,
+      `[Circle: ${trimmedCircleId}] [Type: agreement] [Type: member_pattern] [Type: reminder_preference] circle agreement policy rule grace period member pattern reminder preference`,
+      `[Circle: ${trimmedCircleId}] [Type: tx_digest_association] [Type: verified_payment_event] transaction digest association sui contribution cycle member`,
+    ]
+
+    const recallLimit = Math.min(Math.max(inspectLimit, 50), 100)
+    const rawHitsByBlobId = new Map()
+    let totalDroppedCount = 0
+
+    for (const q of recallQueries) {
+      const recallRes = await client.recall({
+        query: q,
+        limit: recallLimit,
+        namespace,
+        sort: 'recent',
+      })
+      totalDroppedCount += Number(recallRes?.dropped_count) || 0
+      for (const hit of recallRes?.results || []) {
+        const bid = String(hit?.blob_id || '').trim()
+        if (!bid) continue
+        if (!rawHitsByBlobId.has(bid)) {
+          rawHitsByBlobId.set(bid, hit)
+        }
+      }
+      // If listMemories gave us a non-empty inventory and we have already collected every expected blob_id, stop early
+      if (
+        inventoryWalked &&
+        expectedBlobIds.size > 0 &&
+        Array.from(expectedBlobIds).every((bid) => rawHitsByBlobId.has(bid))
+      ) {
+        break
+      }
+    }
+
+    const malformedRecords = []
+    const duplicateRecordsSkipped = []
+    const staleRecordsSkipped = []
+    const conflicts = []
+
+    const validConfigs = []
+    const validTxAssocs = []
+    const validMemories = []
+
+    // Step 4: Quarantine check & strict schema validation for each recalled blob
+    for (const [blobId, hit] of rawHitsByBlobId.entries()) {
+      if (
+        QUARANTINED_SYNTHETIC_BLOB_IDS.has(blobId) ||
+        isQuarantinedSyntheticRecord(hit?.text || '')
+      ) {
+        if (!quarantinedRecordsSkipped.some((q) => q.blobId === blobId)) {
+          quarantinedRecordsSkipped.push({
+            blobId,
+            reason: 'Quarantined synthetic record blocked during restore.',
+          })
+        }
+        expectedBlobIds.delete(blobId)
+        continue
+      }
+
+      const validation = validateWalrusRecordForRestore(hit, trimmedCircleId)
+      if (!validation.valid) {
+        malformedRecords.push({
+          blobId,
+          reason: validation.error,
+          missingFields: validation.missingFields || [],
+        })
+        continue
+      }
+
+      if (validation.recordKind === 'circle_config') {
+        validConfigs.push(validation)
+      } else if (validation.recordKind === 'tx_digest_association') {
+        validTxAssocs.push(validation)
+      } else {
+        validMemories.push(validation)
+      }
+    }
+
+    // Step 5: Reconstruct Circle Configuration (deduplicate, order by version, detect conflicts)
+    const configByHash = new Map()
+    for (const cfgRec of validConfigs) {
+      if (configByHash.has(cfgRec.configHash)) {
+        const primary = configByHash.get(cfgRec.configHash)
+        duplicateRecordsSkipped.push({
+          blobId: cfgRec.blobId,
+          duplicateOfBlobId: primary.blobId,
+          recordKind: 'circle_config',
+        })
+      } else {
+        configByHash.set(cfgRec.configHash, cfgRec)
+      }
+    }
+
+    const uniqueConfigs = Array.from(configByHash.values()).sort((a, b) => {
+      if (a.version !== b.version) return a.version - b.version
+      return String(a.updatedAt).localeCompare(String(b.updatedAt))
+    })
+
+    let selectedConfig = null
+    let hasConfigConflict = false
+
+    if (uniqueConfigs.length === 1) {
+      selectedConfig = uniqueConfigs[0]
+    } else if (uniqueConfigs.length > 1) {
+      // Group by version to detect same-version divergent configs
+      const byVersion = new Map()
+      for (const c of uniqueConfigs) {
+        const list = byVersion.get(c.version) || []
+        list.push(c)
+        byVersion.set(c.version, list)
+      }
+
+      for (const [ver, group] of byVersion.entries()) {
+        if (group.length > 1) {
+          hasConfigConflict = true
+          conflicts.push({
+            type: 'circle_config_conflict',
+            reason: `Multiple circle_config records found at version ${ver} with conflicting configuration hashes.`,
+            version: ver,
+            blobIds: group.map((g) => g.blobId),
+            candidates: group.map((g) => ({
+              blobId: g.blobId,
+              version: g.version,
+              configHash: g.configHash,
+              circleConfig: g.circleConfig,
+              confirmedBy: g.confirmedBy,
+            })),
+          })
+        }
+      }
+
+      // Check hash lineage when versions are distinct
+      if (!hasConfigConflict) {
+        const knownHashes = new Set([uniqueConfigs[0].configHash])
+        for (let i = 1; i < uniqueConfigs.length; i++) {
+          const curr = uniqueConfigs[i]
+          if (curr.previousConfigHash && !knownHashes.has(curr.previousConfigHash)) {
+            hasConfigConflict = true
+            conflicts.push({
+              type: 'circle_config_conflict',
+              reason: `circle_config version ${curr.version} (${curr.blobId}) references previousConfigHash ${curr.previousConfigHash} which does not match prior version history.`,
+              version: curr.version,
+              blobIds: uniqueConfigs.map((u) => u.blobId),
+              candidates: uniqueConfigs.map((g) => ({
+                blobId: g.blobId,
+                version: g.version,
+                configHash: g.configHash,
+                previousConfigHash: g.previousConfigHash,
+                circleConfig: g.circleConfig,
+              })),
+            })
+            break
+          }
+          knownHashes.add(curr.configHash)
+        }
+      }
+
+      if (!hasConfigConflict) {
+        selectedConfig = uniqueConfigs[uniqueConfigs.length - 1]
+        for (let i = 0; i < uniqueConfigs.length - 1; i++) {
+          staleRecordsSkipped.push({
+            blobId: uniqueConfigs[i].blobId,
+            supersededByBlobId: selectedConfig.blobId,
+            version: uniqueConfigs[i].version,
+            recordKind: 'circle_config',
+          })
+        }
+      }
+    }
+
+    // Step 6: Authorize requestingWalletAddress against restored or existing circle roster BEFORE mutating state
+    const existingCircle = circleRegistry.get(trimmedCircleId) || null
+    const authorizationRosters = selectedConfig
+      ? [selectedConfig.circleConfig]
+      : uniqueConfigs.length > 0
+      ? uniqueConfigs.map((u) => u.circleConfig)
+      : existingCircle
+      ? [existingCircle]
+      : []
+
+    if (authorizationRosters.length > 0) {
+      const isAuthorizedInRoster = authorizationRosters.some(
+        (r) =>
+          normalizeSuiAddress(r.organizerAddress) === requestingWalletAddress ||
+          (r.members || []).some((m) => normalizeSuiAddress(m.address) === requestingWalletAddress)
+      )
+      if (!isAuthorizedInRoster) {
+        throw new WalletAuthError(
+          `Authorization failed: wallet ${requestingWalletAddress} is not a registered member or organizer of circle "${trimmedCircleId}".`,
+          403
+        )
+      }
+    }
+
+    let restoredCircle = existingCircle
+    if (selectedConfig && !hasConfigConflict) {
+      restoredCircle = {
+        ...selectedConfig.circleConfig,
+        version: selectedConfig.version,
+        configHash: selectedConfig.configHash,
+        previousConfigHash: selectedConfig.previousConfigHash,
+        walrusConfigBlobId: selectedConfig.blobId,
+        updatedAt: selectedConfig.updatedAt,
+      }
+      circleRegistry.set(trimmedCircleId, restoredCircle)
+    }
+
+    // Step 7: Deduplicate & check conflicts across confirmed group memories (agreements, patterns, preferences)
+    const memoryByHash = new Map()
+    for (const m of validMemories) {
+      const rec = m.record
+      const dedupeKey =
+        rec.proposalHash ||
+        `${rec.memoryType}:${rec.cycle}:${rec.memberId || ''}:${rec.title}:${rec.quote}`
+      if (memoryByHash.has(dedupeKey)) {
+        const primary = memoryByHash.get(dedupeKey)
+        duplicateRecordsSkipped.push({
+          blobId: m.blobId,
+          duplicateOfBlobId: primary.blobId,
+          recordKind: 'memory',
+        })
+      } else {
+        memoryByHash.set(dedupeKey, m)
+      }
+    }
+
+    const uniqueMemories = Array.from(memoryByHash.values())
+    // Detect policy/agreement conflicts on the same (memoryType, cycle, memberId, normalizedTitle)
+    const policySlots = new Map()
+    for (const m of uniqueMemories) {
+      const rec = m.record
+      const slotKey = `${rec.memoryType}:${rec.cycle}:${rec.memberId || 'group'}:${String(rec.title || '').trim().toLowerCase()}`
+      const list = policySlots.get(slotKey) || []
+      list.push(m)
+      policySlots.set(slotKey, list)
+    }
+
+    const activeMemories = []
+    for (const [, group] of policySlots.entries()) {
+      if (group.length === 1) {
+        activeMemories.push(group[0].record)
+        continue
+      }
+      // Check if sorted versions form a clean linear chain via previousProposalHash
+      const sorted = [...group].sort((a, b) => a.version - b.version)
+      let linear = true
+      for (let i = 1; i < sorted.length; i++) {
+        if (
+          sorted[i].version <= sorted[i - 1].version ||
+          (sorted[i].previousProposalHash &&
+            sorted[i].previousProposalHash !== sorted[i - 1].record.proposalHash)
+        ) {
+          linear = false
+          break
+        }
+        if (!sorted[i].previousProposalHash && sorted[i].version === sorted[i - 1].version) {
+          linear = false
+          break
+        }
+      }
+
+      if (linear && sorted[sorted.length - 1].version > sorted[0].version) {
+        const latest = sorted[sorted.length - 1]
+        activeMemories.push(latest.record)
+        for (let i = 0; i < sorted.length - 1; i++) {
+          staleRecordsSkipped.push({
+            blobId: sorted[i].blobId,
+            supersededByBlobId: latest.blobId,
+            version: sorted[i].version,
+            recordKind: 'memory',
+          })
+        }
+      } else {
+        conflicts.push({
+          type: 'policy_conflict',
+          reason: `Conflicting ${group[0].record.memoryType} records for "${group[0].record.title}" in cycle ${group[0].record.cycle}.`,
+          blobIds: group.map((g) => g.blobId),
+          candidates: group.map((g) => ({
+            blobId: g.blobId,
+            version: g.version,
+            title: g.record.title,
+            quote: g.record.quote,
+            confirmedBy: g.record.confirmedBy,
+          })),
+        })
+        for (const g of group) {
+          activeMemories.push(g.record)
+        }
+      }
+    }
+
+    if (!sessionConfirmedCache.has(namespace)) {
+      sessionConfirmedCache.set(namespace, new Map())
+    }
+    const nsCache = sessionConfirmedCache.get(namespace)
+    nsCache.clear()
+    for (const rec of activeMemories) {
+      if (rec.walrusBlobId && !isQuarantinedSyntheticRecord(rec)) {
+        nsCache.set(rec.walrusBlobId, rec)
+      }
+    }
+
+    // Step 8: Deduplicate, conflict-check, and restore transaction digest associations, then re-verify via Tatum
+    const txAssocByKey = new Map()
+    for (const assoc of validTxAssocs) {
+      const exactKey = `${assoc.circleId}:${assoc.cycle}:${assoc.memberAddress}:${assoc.txDigest}:${assoc.network}`
+      if (txAssocByKey.has(exactKey)) {
+        const primary = txAssocByKey.get(exactKey)
+        duplicateRecordsSkipped.push({
+          blobId: assoc.blobId,
+          duplicateOfBlobId: primary.blobId,
+          recordKind: 'tx_digest_association',
+        })
+      } else {
+        txAssocByKey.set(exactKey, assoc)
+      }
+    }
+
+    const uniqueTxAssocs = Array.from(txAssocByKey.values())
+    const txClaimsByDigestNet = new Map()
+    for (const assoc of uniqueTxAssocs) {
+      const claimKey = `${assoc.txDigest}:${assoc.network}`
+      const list = txClaimsByDigestNet.get(claimKey) || []
+      list.push(assoc)
+      txClaimsByDigestNet.set(claimKey, list)
+    }
+
+    const restoredTxAssociations = []
+    const memberCyclesToReverify = new Map()
+
+    for (const [, claimGroup] of txClaimsByDigestNet.entries()) {
+      if (claimGroup.length > 1) {
+        conflicts.push({
+          type: 'tx_digest_conflict',
+          reason: `Transaction digest "${claimGroup[0].txDigest}" on Sui ${claimGroup[0].network} is claimed by multiple conflicting member/cycle records.`,
+          txDigest: claimGroup[0].txDigest,
+          network: claimGroup[0].network,
+          blobIds: claimGroup.map((c) => c.blobId),
+          candidates: claimGroup.map((c) => ({
+            blobId: c.blobId,
+            circleId: c.circleId,
+            cycle: c.cycle,
+            memberId: c.memberId,
+            memberAddress: c.memberAddress,
+          })),
+        })
+        continue
+      }
+
+      const assoc = claimGroup[0]
+      if (restoredCircle) {
+        const inRoster = restoredCircle.members.some(
+          (m) => normalizeSuiAddress(m.address) === assoc.memberAddress
+        )
+        if (!inRoster) {
+          malformedRecords.push({
+            blobId: assoc.blobId,
+            reason: `Transaction digest association references memberAddress ${assoc.memberAddress} which is not in the circle roster.`,
+            missingFields: [],
+          })
+          continue
+        }
+      }
+
+      try {
+        recordSubmittedDigest(
+          trimmedCircleId,
+          assoc.cycle,
+          assoc.memberAddress,
+          assoc.txDigest,
+          {
+            network: assoc.network,
+            poolAddress: restoredCircle?.poolAddress || '',
+            memberId: assoc.memberId,
+          }
+        )
+        restoredTxAssociations.push({
+          blobId: assoc.blobId,
+          circleId: assoc.circleId,
+          cycle: assoc.cycle,
+          memberId: assoc.memberId,
+          memberAddress: assoc.memberAddress,
+          txDigest: assoc.txDigest,
+          network: assoc.network,
+          verifiedOnChain: false,
+        })
+        const mcKey = `${assoc.cycle}:${assoc.memberAddress}`
+        const existingGroup = memberCyclesToReverify.get(mcKey) || {
+          cycle: assoc.cycle,
+          memberId: assoc.memberId,
+          memberAddress: assoc.memberAddress,
+          networks: new Set(),
+          digests: [],
+        }
+        existingGroup.networks.add(assoc.network)
+        existingGroup.digests.push(assoc.txDigest)
+        memberCyclesToReverify.set(mcKey, existingGroup)
+      } catch (err) {
+        if (err instanceof TransactionConflictError) {
+          conflicts.push({
+            type: 'tx_digest_conflict',
+            reason: err.message,
+            txDigest: assoc.txDigest,
+            network: assoc.network,
+            blobIds: [assoc.blobId],
+          })
+        } else {
+          throw err
+        }
+      }
+    }
+
+    // Re-query Tatum for every restored member/cycle digest association
+    const tatumReverifications = []
+    const configuredNetwork = String(
+      loadConfig(env).integrations.tatum.config?.SUI_NETWORK || env.SUI_NETWORK || 'testnet'
+    ).trim()
+
+    if (restoredCircle && memberCyclesToReverify.size > 0) {
+      for (const [, group] of memberCyclesToReverify.entries()) {
+        const rosterMember = restoredCircle.members.find(
+          (m) => normalizeSuiAddress(m.address) === group.memberAddress
+        )
+        const networkMismatch = Array.from(group.networks).find((n) => n !== configuredNetwork)
+        if (networkMismatch) {
+          tatumReverifications.push({
+            circleId: trimmedCircleId,
+            cycle: group.cycle,
+            memberId: rosterMember?.id || group.memberId,
+            memberAddress: group.memberAddress,
+            txDigests: group.digests,
+            status: 'Unverified',
+            code: 'unverified',
+            network: networkMismatch,
+            amountReceived: 0,
+            error: `Restored digest association is for Sui "${networkMismatch}", but server Tatum verifier is configured for Sui "${configuredNetwork}".`,
+          })
+          continue
+        }
+
+        const verifyRes = await verifyMemberContributionOnSui(
+          {
+            circleId: trimmedCircleId,
+            poolAddress: restoredCircle.poolAddress,
+            memberAddress: group.memberAddress,
+            memberId: rosterMember?.id || group.memberId,
+            memberName: rosterMember?.name || group.memberId,
+            token: restoredCircle.tokenType,
+            expectedAmount: restoredCircle.contributionPerMember,
+            windowStart: options.windowStart,
+            windowEnd: options.windowEnd,
+            cycle: group.cycle,
+            txDigests: group.digests,
+            withMemory: true,
+            memories: activeMemories,
+          },
+          {
+            env,
+            fetchRpc: options.fetchRpc,
+            fetchGraphql: options.fetchGraphql,
+          }
+        )
+
+        for (const rAssoc of restoredTxAssociations) {
+          if (rAssoc.cycle === group.cycle && rAssoc.memberAddress === group.memberAddress) {
+            rAssoc.verifiedOnChain =
+              verifyRes.status === 'Verified' ||
+              verifyRes.status === 'Late' ||
+              verifyRes.status === 'Partial'
+            rAssoc.chainStatus = verifyRes.status
+          }
+        }
+
+        tatumReverifications.push({
+          circleId: trimmedCircleId,
+          cycle: group.cycle,
+          memberId: rosterMember?.id || group.memberId,
+          memberAddress: group.memberAddress,
+          txDigests: group.digests,
+          status: verifyRes.status,
+          code: verifyRes.code,
+          network: verifyRes.network || configuredNetwork,
+          amountReceived: verifyRes.amountReceived,
+          observedSender: verifyRes.observedSender,
+          observedRecipient: verifyRes.observedRecipient,
+          executionStatus: verifyRes.executionStatus,
+          timestamp: verifyRes.timestamp,
+          policy: verifyRes.policy,
+          error: verifyRes.error,
+        })
+      }
+    } else if (!restoredCircle && memberCyclesToReverify.size > 0) {
+      for (const [, group] of memberCyclesToReverify.entries()) {
+        tatumReverifications.push({
+          circleId: trimmedCircleId,
+          cycle: group.cycle,
+          memberId: group.memberId,
+          memberAddress: group.memberAddress,
+          txDigests: group.digests,
+          status: 'Unverified',
+          code: 'unverified',
+          network: configuredNetwork,
+          amountReceived: 0,
+          error: 'Cannot re-verify transaction digest on Tatum because circle_config (poolAddress, tokenType, contributionPerMember) is missing or conflicted.',
+        })
+      }
+    }
+
+    // Step 9: Compute missingBlobIds, missingFields, recoveryStatus, and recoveryPath
+    const missingBlobIds = Array.from(expectedBlobIds).filter(
+      (bid) => !rawHitsByBlobId.has(bid)
+    )
+    const missingFields = []
+    if (!restoredCircle && !hasConfigConflict) {
+      missingFields.push(
+        'circle_config (circleId, circleName, poolAddress, tokenType, contributionPerMember, cycleLength, currentCycle, members)'
+      )
+    }
+
+    const isRestoreTruncated =
+      restoreResult.truncated ||
+      restoreResult.failed > 0 ||
+      totalDroppedCount > 0 ||
+      inventoryPaginationTruncated
+
+    const hasConflicts = conflicts.length > 0
+    const hasIncompleteData =
+      !restoredCircle ||
+      missingBlobIds.length > 0 ||
+      missingFields.length > 0 ||
+      malformedRecords.length > 0 ||
+      isRestoreTruncated
+
+    const recoveryStatus = hasConflicts
+      ? 'conflict'
+      : hasIncompleteData
+      ? 'incomplete'
+      : 'complete'
+    const complete = recoveryStatus === 'complete'
+
+    const recoveryPath = []
+    if (missingFields.length > 0) {
+      recoveryPath.push(
+        'Persist the circle configuration and member roster to Walrus (POST /api/memory/circles/persist) so future restarts can reconstruct the circle roster and terms.'
+      )
+    }
+    if (missingBlobIds.length > 0 || isRestoreTruncated) {
+      recoveryPath.push(
+        `Walrus recall/restore did not return all namespace blobs (missingBlobIds: ${missingBlobIds.length}, truncated: ${restoreResult.truncated}, failed: ${restoreResult.failed}, dropped: ${totalDroppedCount}). Retry POST /api/memory/restore with a higher limit (up to 100) or re-confirm any missing records.`
+      )
+    }
+    if (hasConflicts) {
+      recoveryPath.push(
+        `Review the ${conflicts.length} surfaced conflict(s) in the restoration report and submit a new confirmed version (with previousConfigHash / previousProposalHash) to supersede conflicting branches.`
+      )
+    }
+    if (malformedRecords.length > 0) {
+      recoveryPath.push(
+        `${malformedRecords.length} malformed or mismatched Walrus blob(s) were rejected during schema validation. Inspect malformedRecords for blob IDs and reasons.`
+      )
+    }
+
+    return {
+      namespace,
+      circleId: trimmedCircleId,
+      complete,
+      recoveryStatus,
+      restoreResult,
+      circle: restoredCircle,
+      records: activeMemories,
+      restoredTxAssociations,
+      tatumReverifications,
+      expectedBlobCount: expectedBlobIds.size,
+      recoveredBlobCount: rawHitsByBlobId.size - quarantinedRecordsSkipped.length,
+      missingBlobIds,
+      missingFields,
+      conflicts,
+      malformedRecords,
+      staleRecordsSkipped,
+      duplicateRecordsSkipped,
+      quarantinedRecordsSkipped,
+      recoveryPath,
+      limitationsNote:
+        'MemWal retrieval combines restore(namespace, limit), paginated listMemories({ namespace, cursor }) for the blob_id inventory, and targeted semantic recall({ query, limit: 100, sort: "recent" }). Because MemWal restore() is single-shot with a per-owner candidate cap and recall() is similarity-ranked (max 100 per query), complete recovery is verified by comparing recalled blob_ids against listMemories() and checking restoreResult.truncated / failed / dropped_count. Wallet sessions and unconsumed challenges are never stored on Walrus; Tatum is re-queried for all restored transaction digest associations.',
+    }
+  } finally {
+    if (typeof client.destroy === 'function') {
+      client.destroy()
+    }
+  }
+}
+
+/**
+ * Backwards-compatible wrapper around `restoreCircleFromWalrus`.
+ */
+export async function restoreCircleMemoriesFromWalrus(circleId, limit, env = process.env, options = {}) {
+  const circle = getCircleRoster(circleId)
+  const fallbackWallet =
+    options.authenticatedWalletAddress ||
+    circle?.organizerAddress ||
+    circle?.members?.[0]?.address
+  if (fallbackWallet) {
+    return restoreCircleFromWalrus(
+      circleId,
+      {
+        ...options,
+        limit,
+        authenticatedWalletAddress: fallbackWallet,
+      },
+      env
+    )
+  }
+
   assertCircleNotQuarantined(circleId)
   const { client, namespace, tunables } = createMemWalClient(circleId, env)
   try {
@@ -983,16 +2506,20 @@ export async function restoreCircleMemoriesFromWalrus(circleId, limit, env = pro
       { limit: tunables.recallLimit, sort: 'recent' },
       env
     )
-
     return {
       namespace,
+      complete: false,
+      recoveryStatus: 'incomplete',
       restoreResult: restoreRes,
       records: recalled.records,
+      missingFields: ['circle_config'],
       limitationsNote:
-        'Walrus Memory is a semantic vector store for confirmed circle memories. restore() re-indexes on-chain Walrus blobs missing from the relayer vector index (bounded by limit and relayer candidate caps), and recent memories are retrieved via semantic recall. Per preview container constraints, no local runtime database is used; circle rosters, wallet sessions, pending proposals, and submitted digest lists are held in server memory only, while Tatum is the authoritative source of Sui payment evidence.',
+        'Circle configuration was not found in memory and no authenticatedWalletAddress was provided.',
     }
   } finally {
-    client.destroy()
+    if (typeof client.destroy === 'function') {
+      client.destroy()
+    }
   }
 }
 

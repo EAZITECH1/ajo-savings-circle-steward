@@ -91,6 +91,9 @@ export interface MemoryRecord {
 
 export interface WalrusRestoreOutcome {
   namespace: string
+  circleId?: string
+  complete?: boolean
+  recoveryStatus?: 'complete' | 'incomplete' | 'conflict'
   restoreResult: {
     restored: number
     skipped: number
@@ -100,7 +103,60 @@ export interface WalrusRestoreOutcome {
     owner: string
     truncated: boolean
   }
+  circle?: {
+    circleId: string
+    circleName: string
+    poolAddress: string
+    contributionPerMember: number
+    tokenType: string
+    cycleLength: string
+    currentCycle: number
+    organizerAddress: string
+    members: Member[]
+    version?: number
+    configHash?: string
+    walrusConfigBlobId?: string
+  } | null
   records: MemoryRecord[]
+  restoredTxAssociations?: Array<{
+    blobId: string
+    circleId: string
+    cycle: number
+    memberId: string
+    memberAddress: string
+    txDigest: string
+    network: string
+    verifiedOnChain: boolean
+    chainStatus?: CycleStatus
+  }>
+  tatumReverifications?: Array<{
+    circleId: string
+    cycle: number
+    memberId: string
+    memberAddress: string
+    txDigests: string[]
+    status: CycleStatus
+    code?: string
+    network?: string
+    amountReceived?: number
+    policy?: PolicyEvaluation
+    error?: string
+  }>
+  expectedBlobCount?: number
+  recoveredBlobCount?: number
+  missingBlobIds?: string[]
+  missingFields?: string[]
+  conflicts?: Array<{
+    type: string
+    reason: string
+    blobIds?: string[]
+  }>
+  malformedRecords?: Array<{
+    blobId: string
+    reason: string
+    missingFields?: string[]
+  }>
+  recoveryPath?: string[]
   limitationsNote: string
 }
 

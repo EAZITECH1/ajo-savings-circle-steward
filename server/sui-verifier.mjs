@@ -274,6 +274,33 @@ export function clearSubmittedDigests(circleId, cycle, memberAddress) {
   serverVerifiedContributionsStore.delete(key)
 }
 
+export function clearAllCircleSubmittedDigests(circleId) {
+  const normCircleId = String(circleId || 'default').trim()
+  const prefix = `${normCircleId}:`
+  for (const key of Array.from(submittedDigestsStore.keys())) {
+    if (key.startsWith(prefix)) submittedDigestsStore.delete(key)
+  }
+  for (const key of Array.from(serverVerifiedContributionsStore.keys())) {
+    if (key.startsWith(prefix)) serverVerifiedContributionsStore.delete(key)
+  }
+  for (const [txKey, entry] of Array.from(submittedTransactionsStore.entries())) {
+    if (entry.circleId === normCircleId) {
+      submittedTransactionsStore.delete(txKey)
+    }
+  }
+}
+
+export function listSubmittedTransactionsForCircle(circleId) {
+  const normCircleId = String(circleId || 'default').trim()
+  const items = []
+  for (const entry of submittedTransactionsStore.values()) {
+    if (entry.circleId === normCircleId) {
+      items.push({ ...entry })
+    }
+  }
+  return items
+}
+
 /**
  * Parse a `sui_getTransactionBlock` result payload into verified transfer observations.
  * Verifies that `transaction.data.sender`, `effects.status.status`, `balanceChanges`,

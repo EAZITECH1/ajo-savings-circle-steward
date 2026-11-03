@@ -552,7 +552,33 @@ export default function App() {
     }
   }
 
-  // Rebuild / restore from Walrus action
+  // Persist active circle configuration & roster snapshot to Walrus Mainnet
+  const handlePersistCircleConfig = async () => {
+    if (!circleId) {
+      setMemoryError('Activate or register a circle first before saving its configuration to Walrus.')
+      return
+    }
+    setIsMemoryWriting(true)
+    setMemoryError(null)
+    try {
+      const persisted = await memoryStore.persistCircleConfig({ circleId })
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: Date.now().toString(),
+          sender: 'steward',
+          text: `Saved circle configuration v${persisted.version} to Walrus Mainnet (Blob ID: ${persisted.walrusBlobId}) [${persisted.confirmedBy}].`,
+          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        },
+      ])
+    } catch (err: any) {
+      setMemoryError(err.message || 'Failed to persist circle configuration to Walrus')
+    } finally {
+      setIsMemoryWriting(false)
+    }
+  }
+
+  // Rebuild / restore circle configuration, memories, and Tatum-reverified digests from Walrus
   const handleRestoreFromWalrus = async () => {
     const targetCircle = (lookupCircleSlug || circleId).trim()
     if (!targetCircle) {
@@ -564,11 +590,41 @@ export default function App() {
     try {
       memoryStore.setCircleId(targetCircle)
       setCircleId(targetCircle)
-      const outcome = await memoryStore.restore(15)
+      const outcome = await memoryStore.restore(25, { windowStart, windowEnd })
       setRestoreOutcome(outcome)
       setMemoriesList(outcome.records || [])
+      if (outcome.circle) {
+        setCircleName(outcome.circle.circleName)
+        setPoolAddress(outcome.circle.poolAddress)
+        setContributionPerMember(outcome.circle.contributionPerMember)
+        setTokenType(outcome.circle.tokenType)
+        setCycleLength(outcome.circle.cycleLength)
+        setSelectedCycle(outcome.circle.currentCycle)
+        setMembers(outcome.circle.members)
+        if (!confirmingMemberId && outcome.circle.members[0]?.id) {
+          setConfirmingMemberId(outcome.circle.members[0].id)
+        }
+      }
+      if (Array.isArray(outcome.tatumReverifications) && outcome.tatumReverifications.length > 0) {
+        setVerifications((prev) => {
+          const next = { ...prev }
+          for (const rv of outcome.tatumReverifications!) {
+            next[`${rv.memberId}_${rv.cycle}`] = {
+              status: rv.status,
+              code: rv.code as any,
+              txDigest: rv.txDigests?.[0],
+              txDigests: rv.txDigests,
+              amountReceived: rv.amountReceived,
+              network: rv.network,
+              policy: rv.policy,
+              error: rv.error,
+            }
+          }
+          return next
+        })
+      }
     } catch (err: any) {
-      setMemoryError(err.message || 'Failed to restore memories from Walrus')
+      setMemoryError(err.message || 'Failed to restore circle state from Walrus')
     } finally {
       setIsMemoryLoading(false)
     }
@@ -2033,23 +2089,78 @@ export default function App() {
                   </button>
                   <button
                     type="button"
+                    onClick={handlePersistCircleConfig}
+                    disabled={isMemoryWriting || !circleId || !memwalHealth.configured}
+                    className="inline-flex items-center justify-center gap-xs rounded-lg bg-primary px-lg py-sm text-xs font-semibold text-secondary border border-primary shadow-xs hover:bg-primary-hover disabled:opacity-50"
+                  >
+                    <span>Save config to Walrus</span>
+                  </button>
+                  <button
+                    type="button"
                     onClick={handleRestoreFromWalrus}
                     disabled={isMemoryLoading || !memwalHealth.configured}
                     className="inline-flex items-center justify-center gap-xs rounded-lg bg-brand-solid px-lg py-sm text-xs font-semibold text-primary-on-brand shadow-xs hover:bg-brand-solid-hover disabled:opacity-50"
                   >
-                    <span>Rebuild index from Walrus</span>
+                    <span>Restore circle from Walrus</span>
                   </button>
                 </div>
 
                 {restoreOutcome && (
-                  <div className="p-md rounded-lg bg-secondary border border-secondary text-xs space-y-xxs">
-                    <p className="font-semibold text-primary">
-                      Walrus Index Restore ({restoreOutcome.namespace}): restored=
-                      {restoreOutcome.restoreResult.restored}, skipped=
-                      {restoreOutcome.restoreResult.skipped}, failed=
-                      {restoreOutcome.restoreResult.failed}, total=
-                      {restoreOutcome.restoreResult.total}
-                    </p>
+                  <div className="p-md rounded-lg bg-secondary border border-secondary text-xs space-y-xs">
+                    <div className="flex flex-wrap items-center justify-between gap-xs">
+                      <p className="font-semibold text-primary">
+                        Walrus Recovery ({restoreOutcome.namespace}): restored=
+                        {restoreOutcome.restoreResult.restored}, skipped=
+                        {restoreOutcome.restoreResult.skipped}, failed=
+                        {restoreOutcome.restoreResult.failed}, total=
+                        {restoreOutcome.restoreResult.total}
+                      </p>
+                      <span
+                        className={`inline-flex items-center rounded-md px-sm py-xxs text-xs font-semibold border ${
+                          restoreOutcome.recoveryStatus === 'complete'
+                            ? 'bg-utility-success-50 text-utility-success-700 border-utility-success-200'
+                            : restoreOutcome.recoveryStatus === 'conflict'
+                            ? 'bg-utility-error-50 text-utility-error-700 border-utility-error-200'
+                            : 'bg-utility-warning-50 text-utility-warning-700 border-utility-warning-200'
+                        }`}
+                      >
+                        {restoreOutcome.recoveryStatus === 'complete'
+                          ? 'Recovery Complete'
+                          : restoreOutcome.recoveryStatus === 'conflict'
+                          ? 'Conflicts Detected — Review Required'
+                          : 'Incomplete Recovery'}
+                      </span>
+                    </div>
+                    {restoreOutcome.conflicts && restoreOutcome.conflicts.length > 0 && (
+                      <div className="p-sm rounded bg-utility-error-50 border border-error-subtle text-error-primary space-y-xxs">
+                        <p className="font-semibold">Surfaced Conflicts (not silently resolved):</p>
+                        {restoreOutcome.conflicts.map((c, idx) => (
+                          <p key={idx}>
+                            • [{c.type}] {c.reason}{' '}
+                            {c.blobIds?.length ? `(Blobs: ${c.blobIds.join(', ')})` : ''}
+                          </p>
+                        ))}
+                      </div>
+                    )}
+                    {((restoreOutcome.missingFields && restoreOutcome.missingFields.length > 0) ||
+                      (restoreOutcome.missingBlobIds && restoreOutcome.missingBlobIds.length > 0)) && (
+                      <div className="p-sm rounded bg-utility-warning-50 border border-utility-warning-200 text-utility-warning-700 space-y-xxs">
+                        {restoreOutcome.missingFields && restoreOutcome.missingFields.length > 0 && (
+                          <p>Missing fields: {restoreOutcome.missingFields.join(', ')}</p>
+                        )}
+                        {restoreOutcome.missingBlobIds && restoreOutcome.missingBlobIds.length > 0 && (
+                          <p>Unrecalled blob IDs: {restoreOutcome.missingBlobIds.join(', ')}</p>
+                        )}
+                      </div>
+                    )}
+                    {restoreOutcome.recoveryPath && restoreOutcome.recoveryPath.length > 0 && (
+                      <div className="text-secondary space-y-xxs">
+                        <p className="font-semibold">Recovery path:</p>
+                        {restoreOutcome.recoveryPath.map((step, idx) => (
+                          <p key={idx}>• {step}</p>
+                        ))}
+                      </div>
+                    )}
                     <p className="text-tertiary">{restoreOutcome.limitationsNote}</p>
                   </div>
                 )}

@@ -2,15 +2,18 @@ import { Router } from 'express'
 import {
   checkWalrusMemoryHealth,
   upsertCircleRoster,
+  getCircleRoster,
   listCircleRosters,
   verifyCircleMembership,
   proposeCircleMemory,
   getPendingProposals,
   issueConfirmationChallenge,
   confirmAndWriteMemory,
+  persistCircleConfigToWalrus,
+  persistTxDigestAssociationToWalrus,
   recallCircleMemories,
   listCircleMemories,
-  restoreCircleMemoriesFromWalrus,
+  restoreCircleFromWalrus,
 } from '../walrus-memory.mjs'
 import { requireWalletSession, WalletAuthError } from '../wallet-auth.mjs'
 
@@ -18,6 +21,7 @@ const router = Router()
 
 function mapErrorStatus(err, fallback = 400) {
   if (err instanceof WalletAuthError) return err.statusCode
+  if (err?.name === 'TransactionConflictError') return 409
   if (err?.name === 'ConfigValidationError') return 503
   if (err?.message?.includes('Authorization failed')) return 403
   if (err?.message?.includes('not registered')) return 404
@@ -38,13 +42,79 @@ router.get('/circles', (req, res) => {
   }
 })
 
-router.post('/circles', (req, res) => {
+router.post('/circles', async (req, res) => {
   try {
     const session = requireWalletSession(req)
-    const circle = upsertCircleRoster(req.body || {}, {
+    const body = req.body || {}
+    const circle = upsertCircleRoster(body, {
       authenticatedWalletAddress: session.walletAddress,
     })
+    if (body.persistToWalrus === true) {
+      const persisted = await persistCircleConfigToWalrus({
+        circleId: circle.circleId,
+        memberAddress: session.walletAddress,
+        proposalId: body.proposalId,
+        challengeNonce: body.challengeNonce,
+        signature: body.signature,
+        publicKeyHex: body.publicKeyHex,
+      })
+      return res.json({
+        circle: persisted.circle,
+        walrusBlobId: persisted.walrusBlobId,
+        namespace: persisted.namespace,
+        version: persisted.version,
+        configHash: persisted.configHash,
+        confirmationType: persisted.confirmationType,
+        confirmedBy: persisted.confirmedBy,
+      })
+    }
     res.json({ circle })
+  } catch (err) {
+    res.status(mapErrorStatus(err, 400)).json({ error: err.message })
+  }
+})
+
+router.post('/circles/persist', async (req, res) => {
+  try {
+    const session = requireWalletSession(req)
+    const body = req.body || {}
+    if (!body.circleId) {
+      return res.status(400).json({ error: 'circleId is required to persist circle configuration to Walrus' })
+    }
+    const persisted = await persistCircleConfigToWalrus({
+      circleId: body.circleId,
+      memberId: body.memberId,
+      memberAddress: session.walletAddress,
+      proposalId: body.proposalId,
+      challengeNonce: body.challengeNonce,
+      signature: body.signature,
+      publicKeyHex: body.publicKeyHex,
+    })
+    res.json(persisted)
+  } catch (err) {
+    res.status(mapErrorStatus(err, 400)).json({ error: err.message })
+  }
+})
+
+router.post('/tx-associations', async (req, res) => {
+  try {
+    const session = requireWalletSession(req)
+    const body = req.body || {}
+    if (!body.circleId || !body.txDigest) {
+      return res.status(400).json({
+        error: 'circleId and txDigest are required to persist a transaction digest association to Walrus.',
+      })
+    }
+    const association = await persistTxDigestAssociationToWalrus({
+      circleId: body.circleId,
+      cycle: body.cycle,
+      memberId: body.memberId,
+      memberAddress: body.memberAddress,
+      txDigest: body.txDigest,
+      network: body.network,
+      authenticatedWalletAddress: session.walletAddress,
+    })
+    res.json({ association })
   } catch (err) {
     res.status(mapErrorStatus(err, 400)).json({ error: err.message })
   }
@@ -157,12 +227,22 @@ router.get('/list', async (req, res) => {
 router.post('/restore', async (req, res) => {
   try {
     const session = requireWalletSession(req)
-    const { circleId, limit } = req.body || {}
+    const { circleId, limit, windowStart, windowEnd } = req.body || {}
     if (!circleId) {
       return res.status(400).json({ error: 'circleId is required for Walrus restore' })
     }
-    verifyCircleMembership(circleId, { memberAddress: session.walletAddress })
-    const result = await restoreCircleMemoriesFromWalrus(circleId, limit)
+    // If circle is already active in memory, verify membership immediately before querying Walrus.
+    // After a server restart (when circleRegistry is empty), restoreCircleFromWalrus verifies
+    // session.walletAddress against the restored circle_config roster before applying state.
+    if (getCircleRoster(circleId)) {
+      verifyCircleMembership(circleId, { memberAddress: session.walletAddress })
+    }
+    const result = await restoreCircleFromWalrus(circleId, {
+      authenticatedWalletAddress: session.walletAddress,
+      limit,
+      windowStart,
+      windowEnd,
+    })
     res.json(result)
   } catch (err) {
     res.status(mapErrorStatus(err, 500)).json({ error: err.message })

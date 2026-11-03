@@ -239,19 +239,76 @@ export class WalrusMemoryStore implements MemoryStore {
     return data.records || []
   }
 
-  async restore(limit?: number): Promise<WalrusRestoreOutcome> {
+  async restore(
+    limit?: number,
+    options?: { windowStart?: string; windowEnd?: string }
+  ): Promise<WalrusRestoreOutcome> {
     if (!this.circleId) {
       throw new Error('Cannot restore from Walrus without an active circleId.')
     }
     const res = await fetch('/api/memory/restore', {
       method: 'POST',
       headers: getAuthHeaders(),
-      body: JSON.stringify({ circleId: this.circleId, limit }),
+      body: JSON.stringify({
+        circleId: this.circleId,
+        limit,
+        windowStart: options?.windowStart,
+        windowEnd: options?.windowEnd,
+      }),
     })
     const data = await res.json()
     if (!res.ok) {
       throw new Error(data.error || `HTTP ${res.status}: Failed to restore memories from Walrus`)
     }
     return data
+  }
+
+  async persistCircleConfig(params?: {
+    circleId?: string
+    memberId?: string
+    proposalId?: string
+    challengeNonce?: string
+    signature?: string
+  }) {
+    const circleId = params?.circleId || this.circleId
+    if (!circleId) {
+      throw new Error('Cannot persist circle configuration without an active circleId.')
+    }
+    const res = await fetch('/api/memory/circles/persist', {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify({ ...params, circleId }),
+    })
+    const data = await res.json()
+    if (!res.ok) {
+      throw new Error(data.error || `HTTP ${res.status}: Failed to persist circle configuration to Walrus`)
+    }
+    return data
+  }
+
+  async persistTxAssociation(params: {
+    circleId?: string
+    cycle: number
+    memberId?: string
+    memberAddress?: string
+    txDigest: string
+    network?: string
+  }) {
+    const circleId = params.circleId || this.circleId
+    if (!circleId) {
+      throw new Error('Cannot persist transaction digest association without an active circleId.')
+    }
+    const res = await fetch('/api/memory/tx-associations', {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify({ ...params, circleId }),
+    })
+    const data = await res.json()
+    if (!res.ok) {
+      throw new Error(
+        data.error || `HTTP ${res.status}: Failed to persist transaction digest association to Walrus`
+      )
+    }
+    return data.association
   }
 }
