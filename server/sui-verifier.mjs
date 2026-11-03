@@ -1,5 +1,5 @@
 import { loadConfig } from './config.mjs'
-import { tatumRpc, MissingApiKeyError } from './tatum-client.mjs'
+import { tatumRpc, tatumGraphql, MissingApiKeyError } from './tatum-client.mjs'
 import {
   classifyChainContribution,
   evaluateContributionPolicy,
@@ -212,16 +212,154 @@ export function parseSuiTransactionBlock(txDigest, rpcResult, expectedPoolAddres
 }
 
 /**
- * Look up a single Sui transaction digest via Tatum's official `sui_getTransactionBlock` JSON-RPC method.
- * Reference: https://docs.tatum.io/reference/rpc-sui-sui_gettransactionblock
+ * Parse a Tatum Sui GraphQL `transaction(digest)` payload into verified transfer observations.
+ * Verifies that `sender.address`, `effects.status`, `effects.timestamp`, and
+ * `effects.balanceChanges.nodes` are present before extracting transfers.
+ *
+ * @param {string} txDigest
+ * @param {any} gqlTx
+ * @param {string} expectedPoolAddress
+ * @param {number} tokenDecimals
+ */
+export function parseSuiGraphqlTransaction(txDigest, gqlTx, expectedPoolAddress, tokenDecimals = 6) {
+  if (!gqlTx || typeof gqlTx !== 'object') {
+    return {
+      lookupStatus: 'not_found',
+      lookupError: `Transaction digest "${txDigest}" was not found on Sui.`,
+      transfers: [],
+    }
+  }
+
+  const sender = gqlTx?.sender?.address
+  const statusStr = gqlTx?.effects?.status
+  const balanceChangesNodes = gqlTx?.effects?.balanceChanges?.nodes
+  const rawTimestampIso = gqlTx?.effects?.timestamp
+
+  const missingFields = []
+  if (!sender || typeof sender !== 'string') missingFields.push('sender.address')
+  if (!statusStr || typeof statusStr !== 'string') missingFields.push('effects.status')
+  if (!Array.isArray(balanceChangesNodes)) missingFields.push('effects.balanceChanges.nodes')
+  const parsedTimeMs = rawTimestampIso ? Date.parse(rawTimestampIso) : NaN
+  if (!rawTimestampIso || Number.isNaN(parsedTimeMs)) {
+    missingFields.push('effects.timestamp')
+  }
+
+  if (missingFields.length > 0) {
+    return {
+      lookupStatus: 'incomplete_fields',
+      lookupError: `Sui GraphQL transaction "${txDigest}" response is missing required fields: ${missingFields.join(', ')}.`,
+      transfers: [],
+    }
+  }
+
+  const executionSuccess = statusStr.toUpperCase() === 'SUCCESS'
+  const timestampMs = parsedTimeMs
+
+  if (!executionSuccess) {
+    return {
+      lookupStatus: 'found',
+      transfers: [
+        {
+          txDigest,
+          sender,
+          recipient: expectedPoolAddress,
+          tokenType: '',
+          amount: 0,
+          timestampMs,
+          executionSuccess: false,
+        },
+      ],
+    }
+  }
+
+  const divisor = Math.pow(10, Number.isInteger(tokenDecimals) ? tokenDecimals : 6)
+  const positiveChanges = []
+
+  for (const bc of balanceChangesNodes) {
+    const recipient = bc?.owner?.address || ''
+    const coinType = bc?.coinType?.repr || ''
+    const rawAmtStr = String(bc?.amount ?? '0')
+    let rawAmtBig
+    try {
+      rawAmtBig = BigInt(rawAmtStr)
+    } catch {
+      continue
+    }
+    if (rawAmtBig > 0n && recipient && coinType) {
+      const humanAmount = Number(rawAmtBig) / divisor
+      positiveChanges.push({
+        txDigest,
+        sender,
+        recipient,
+        tokenType: coinType,
+        amount: humanAmount,
+        timestampMs,
+        executionSuccess: true,
+      })
+    }
+  }
+
+  if (positiveChanges.length === 0) {
+    return {
+      lookupStatus: 'found',
+      transfers: [
+        {
+          txDigest,
+          sender,
+          recipient: '',
+          tokenType: '',
+          amount: 0,
+          timestampMs,
+          executionSuccess: true,
+        },
+      ],
+    }
+  }
+
+  return {
+    lookupStatus: 'found',
+    transfers: positiveChanges,
+  }
+}
+
+const SUI_GRAPHQL_TX_QUERY = `
+  query GetSuiTransaction($digest: String!) {
+    transaction(digest: $digest) {
+      digest
+      sender {
+        address
+      }
+      effects {
+        status
+        timestamp
+        balanceChanges {
+          nodes {
+            owner {
+              address
+            }
+            coinType {
+              repr
+            }
+            amount
+          }
+        }
+      }
+    }
+  }
+`
+
+/**
+ * Look up a single Sui transaction digest via Tatum's Sui Gateway (GraphQL `/graphql` or JSON-RPC `sui_getTransactionBlock`).
  *
  * @param {string} txDigest
  * @param {string} expectedPoolAddress
- * @param {{ env?: NodeJS.ProcessEnv, fetchRpc?: typeof tatumRpc }} [options]
+ * @param {{ env?: NodeJS.ProcessEnv, fetchRpc?: typeof tatumRpc, fetchGraphql?: typeof tatumGraphql }} [options]
  */
 export async function lookupSuiTransactionViaTatum(txDigest, expectedPoolAddress, options = {}) {
   const env = options.env || process.env
+  const hasCustomRpc = typeof options.fetchRpc === 'function'
   const rpcCaller = options.fetchRpc || tatumRpc
+  const gqlCaller = options.fetchGraphql || tatumGraphql
 
   if (!isValidSuiDigest(txDigest)) {
     return {
@@ -246,6 +384,53 @@ export async function lookupSuiTransactionViaTatum(txDigest, expectedPoolAddress
   const decimals = tatumCfg.SUI_TOKEN_DECIMALS
 
   try {
+    if (!hasCustomRpc) {
+      // Use Tatum Sui GraphQL Gateway (`https://sui-{network}.gateway.tatum.io/graphql`)
+      const gqlPayload = await rpcQueue.enqueue(
+        async () => {
+          const res = await gqlCaller(
+            'sui',
+            SUI_GRAPHQL_TX_QUERY,
+            { digest: txDigest.trim() },
+            network,
+            env
+          )
+
+          if (res.status === 429 || res.status === 502 || res.status === 503 || res.status === 504) {
+            const retryErr = new Error(`Tatum Sui GraphQL HTTP ${res.status}`)
+            retryErr.retryable = true
+            throw retryErr
+          }
+
+          if (!res.ok) {
+            throw new Error(`Tatum Sui GraphQL returned HTTP ${res.status}`)
+          }
+
+          return res.json()
+        },
+        {
+          rateLimitRps: tunables.rateLimitRps,
+          rateLimitMaxRetries: tunables.rateLimitMaxRetries,
+          rateLimitBackoffMs: tunables.rateLimitBackoffMs,
+        }
+      )
+
+      if (Array.isArray(gqlPayload?.errors) && gqlPayload.errors.length > 0) {
+        const errMsg = gqlPayload.errors.map((e) => e.message).join('; ')
+        const isNotFound =
+          errMsg.toLowerCase().includes('not find') ||
+          errMsg.toLowerCase().includes('not found') ||
+          errMsg.toLowerCase().includes('does not exist')
+        return {
+          lookupStatus: isNotFound ? 'not_found' : 'unavailable',
+          lookupError: `Sui GraphQL error for digest "${txDigest}": ${errMsg}`,
+          transfers: [],
+        }
+      }
+
+      return parseSuiGraphqlTransaction(txDigest.trim(), gqlPayload?.data?.transaction, expectedPoolAddress, decimals)
+    }
+
     const rpcPayload = await rpcQueue.enqueue(
       async () => {
         const res = await rpcCaller(
@@ -311,7 +496,7 @@ export async function lookupSuiTransactionViaTatum(txDigest, expectedPoolAddress
     }
     return {
       lookupStatus: 'unavailable',
-      lookupError: `Failed to query Tatum Sui RPC (${network}): ${err.message}`,
+      lookupError: `Failed to query Tatum Sui Gateway (${network}): ${err.message}`,
       transfers: [],
     }
   }
@@ -497,11 +682,13 @@ export async function verifyMemberContributionOnSui(params, options = {}) {
 }
 
 /**
- * Check live Tatum Sui RPC connectivity using official `sui_getChainIdentifier` method.
+ * Check live Tatum Sui Gateway connectivity using GraphQL (`chainIdentifier`) or JSON-RPC (`sui_getChainIdentifier`).
  */
 export async function checkTatumSuiStatus(options = {}) {
   const env = options.env || process.env
+  const hasCustomRpc = typeof options.fetchRpc === 'function'
   const rpcCaller = options.fetchRpc || tatumRpc
+  const gqlCaller = options.fetchGraphql || tatumGraphql
   const cfg = loadConfig(env)
 
   if (!cfg.integrations.tatum.configured || !cfg.integrations.tatum.config) {
@@ -516,6 +703,47 @@ export async function checkTatumSuiStatus(options = {}) {
 
   const network = cfg.integrations.tatum.config.SUI_NETWORK
   try {
+    if (!hasCustomRpc) {
+      const res = await gqlCaller(
+        'sui',
+        '{ chainIdentifier checkpoint { sequenceNumber } }',
+        {},
+        network,
+        env
+      )
+
+      if (!res.ok) {
+        return {
+          connected: false,
+          configured: true,
+          chain: 'sui',
+          network: `sui-${network}`,
+          statusCode: res.status,
+          error: `Tatum Sui GraphQL Gateway returned HTTP ${res.status}`,
+        }
+      }
+
+      const data = await res.json()
+      if (Array.isArray(data?.errors) && data.errors.length > 0) {
+        return {
+          connected: false,
+          configured: true,
+          chain: 'sui',
+          network: `sui-${network}`,
+          error: data.errors.map((e) => e.message).join('; '),
+        }
+      }
+
+      return {
+        connected: true,
+        configured: true,
+        chain: 'sui',
+        network: `sui-${network}`,
+        chainId: data?.data?.chainIdentifier || null,
+        latestCheckpoint: data?.data?.checkpoint?.sequenceNumber ?? null,
+      }
+    }
+
     const res = await rpcCaller(
       'sui',
       {

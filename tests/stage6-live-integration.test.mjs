@@ -6,7 +6,7 @@ import {
   recallCircleMemories,
   restoreCircleMemoriesFromWalrus,
 } from '../server/walrus-memory.mjs'
-import { checkTatumSuiStatus } from '../server/sui-verifier.mjs'
+import { checkTatumSuiStatus, lookupSuiTransactionViaTatum } from '../server/sui-verifier.mjs'
 import { runStewardChat } from '../server/steward-llm.mjs'
 
 loadDotEnvIfPresent()
@@ -53,6 +53,13 @@ test(
     const status = await checkTatumSuiStatus()
     assert.equal(status.connected, true, `Tatum Sui RPC failed: ${status.error || 'unknown error'}`)
     assert.ok(status.chainId)
+
+    const lookup = await lookupSuiTransactionViaTatum(
+      '3jseEdb6UizBY9bfPVtR3GVDrbrfbsviThfL8fRSPTUa',
+      '0x4483dd1b153465279d4483930b929e6709a5ed7815c1258733106a529ed284f8'
+    )
+    assert.equal(lookup.lookupStatus, 'found', `Expected found, got ${lookup.lookupStatus}: ${lookup.lookupError}`)
+    assert.ok(Array.isArray(lookup.transfers) && lookup.transfers.length > 0)
   }
 )
 
