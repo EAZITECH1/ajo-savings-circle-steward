@@ -85,22 +85,80 @@ export function resolveCircleNamespace(circleId, env = process.env) {
 }
 
 /**
- * Create a configured MemWal SDK client from validated environment variables.
+ * Shared in-memory cache of MemWal client instances keyed by endpoint + account + namespace.
+ * Prevents redundant preflight /version probes and session rebuilding on every request,
+ * which triggers HTTP 429 rate limits on the Walrus relayer.
+ */
+const memwalClientCache = new Map()
+
+export function clearMemWalClientCache() {
+  for (const client of memwalClientCache.values()) {
+    try {
+      if (typeof client?.destroy === 'function' && !client.destroyed) {
+        client.destroy()
+      }
+    } catch {}
+  }
+  memwalClientCache.clear()
+}
+
+/**
+ * Helper to retry Walrus relayer operations with exponential backoff on HTTP 429 rate limit.
+ */
+export async function withWalrusRetry(fn, maxRetries = 3, baseBackoffMs = 1500) {
+  let attempt = 0
+  while (true) {
+    try {
+      return await fn()
+    } catch (err) {
+      attempt++
+      const msg = String(err?.message || '')
+      const is429 = msg.includes('429') || err?.status === 429 || msg.includes('rate limit') || msg.includes('Too Many Requests')
+      if (is429 && attempt <= maxRetries) {
+        const delay = baseBackoffMs * Math.pow(2, attempt - 1) + Math.floor(Math.random() * 500)
+        console.warn(`[Walrus] Rate limited (429). Retrying attempt ${attempt}/${maxRetries} after ${delay}ms...`)
+        await new Promise((resolve) => setTimeout(resolve, delay))
+        continue
+      }
+      throw err
+    }
+  }
+}
+
+/**
+ * Create or reuse a configured MemWal SDK client from validated environment variables.
  * Never reads env vars implicitly inside the SDK.
  */
-export function createMemWalClient(circleId, env = process.env) {
+export function createMemWalClient(circleId, env = process.env, options = {}) {
   const { serviceConfig, tunables } = requireIntegrationConfig('memwal', env)
   const namespace = circleId
     ? resolveCircleNamespace(circleId, env)
     : serviceConfig.MEMWAL_NAMESPACE_PREFIX || 'ajo-circle'
-  const client = MemWal.create({
-    key: serviceConfig.MEMWAL_KEY,
-    accountId: serviceConfig.MEMWAL_ACCOUNT_ID,
-    serverUrl: serviceConfig.MEMWAL_SERVER_URL,
-    namespace,
-    requestTimeoutMs: tunables.requestTimeoutMs,
-  })
-  return { client, namespace, serviceConfig, tunables }
+
+  if (options.fresh === true) {
+    const client = MemWal.create({
+      key: serviceConfig.MEMWAL_KEY,
+      accountId: serviceConfig.MEMWAL_ACCOUNT_ID,
+      serverUrl: serviceConfig.MEMWAL_SERVER_URL,
+      namespace,
+      requestTimeoutMs: tunables.requestTimeoutMs,
+    })
+    return { client, namespace, serviceConfig, tunables, isCached: false }
+  }
+
+  const cacheKey = `${serviceConfig.MEMWAL_SERVER_URL}:${serviceConfig.MEMWAL_ACCOUNT_ID}:${namespace}`
+  let client = memwalClientCache.get(cacheKey)
+  if (!client || client.destroyed) {
+    client = MemWal.create({
+      key: serviceConfig.MEMWAL_KEY,
+      accountId: serviceConfig.MEMWAL_ACCOUNT_ID,
+      serverUrl: serviceConfig.MEMWAL_SERVER_URL,
+      namespace,
+      requestTimeoutMs: tunables.requestTimeoutMs,
+    })
+    memwalClientCache.set(cacheKey, client)
+  }
+  return { client, namespace, serviceConfig, tunables, isCached: true }
 }
 
 /**
@@ -1371,11 +1429,12 @@ export async function confirmAndWriteMemory(input, env = process.env) {
     verifiedProposalHash = computeProposalHash({ ...proposalToWrite, circleId })
   }
 
-  const { client, namespace, tunables } = memwalClientOverride
+  const { client, namespace, tunables, isCached } = memwalClientOverride
     ? {
         client: memwalClientOverride,
         namespace: resolveCircleNamespace(circleId, env),
         tunables: loadConfig(env).tunables,
+        isCached: false,
       }
     : createMemWalClient(circleId, env)
   try {
@@ -1412,11 +1471,13 @@ export async function confirmAndWriteMemory(input, env = process.env) {
     const serializedText = serializeMemoryForWalrus(draftRecord)
 
     // Write to Walrus Mainnet and wait for terminal completion (`done` + real `blob_id`)
-    const rememberResult = await client.rememberAndWait(serializedText, namespace, {
-      pollIntervalMs: tunables.pollingIntervalMs,
-      timeoutMs: Math.max(tunables.requestTimeoutMs * 4, 90000),
-      idempotencyKey: `${circle.circleId}:${proposalToWrite.id || recordId}`,
-    })
+    const rememberResult = await withWalrusRetry(() =>
+      client.rememberAndWait(serializedText, namespace, {
+        pollIntervalMs: tunables.pollingIntervalMs,
+        timeoutMs: Math.max(tunables.requestTimeoutMs * 4, 90000),
+        idempotencyKey: `${circle.circleId}:${proposalToWrite.id || recordId}`,
+      })
+    )
 
     if (!rememberResult || !rememberResult.blob_id) {
       throw new Error('Walrus Memory write completed without returning a valid blob_id.')
@@ -1453,7 +1514,7 @@ export async function confirmAndWriteMemory(input, env = process.env) {
 
     return savedRecord
   } finally {
-    if (typeof client.destroy === 'function') {
+    if (!isCached && typeof client.destroy === 'function') {
       client.destroy()
     }
   }
@@ -1545,11 +1606,12 @@ export async function persistCircleConfigToWalrus(input, env = process.env) {
     }
   }
 
-  const { client, namespace, tunables } = memwalClientOverride
+  const { client, namespace, tunables, isCached } = memwalClientOverride
     ? {
         client: memwalClientOverride,
         namespace: resolveCircleNamespace(circle.circleId, env),
         tunables: loadConfig(env).tunables,
+        isCached: false,
       }
     : createMemWalClient(circle.circleId, env)
 
@@ -1566,12 +1628,14 @@ export async function persistCircleConfigToWalrus(input, env = process.env) {
       proposalHash: configHash,
     })
 
-    const rememberResult = await client.rememberAndWait(serialized, namespace, {
-      pollIntervalMs: tunables.pollingIntervalMs,
-      timeoutMs: Math.max(tunables.requestTimeoutMs * 4, 90000),
-      idempotencyKey: `${circle.circleId}:circle_config:v${version}:${configHash}`,
-      dedupe: true,
-    })
+    const rememberResult = await withWalrusRetry(() =>
+      client.rememberAndWait(serialized, namespace, {
+        pollIntervalMs: tunables.pollingIntervalMs,
+        timeoutMs: Math.max(tunables.requestTimeoutMs * 4, 90000),
+        idempotencyKey: `${circle.circleId}:circle_config:v${version}:${configHash}`,
+        dedupe: true,
+      })
+    )
 
     if (!rememberResult || !rememberResult.blob_id) {
       throw new Error('Walrus Memory write for circle_config completed without returning a valid blob_id.')
@@ -1596,7 +1660,7 @@ export async function persistCircleConfigToWalrus(input, env = process.env) {
       confirmedBy: confirmedByLabel,
     }
   } finally {
-    if (typeof client.destroy === 'function') {
+    if (!isCached && typeof client.destroy === 'function') {
       client.destroy()
     }
   }
@@ -1659,11 +1723,12 @@ export async function persistTxDigestAssociationToWalrus(input, env = process.en
   const confirmingAddr = normalizeSuiAddress(actorMember.address)
   const confirmedByLabel = `Digest association recorded by ${actorMember.name} (${confirmingAddr}) for ${targetMember.name} — unverified until Tatum confirms on Sui ${resolvedNetwork}`
 
-  const { client, namespace, tunables } = memwalClientOverride
+  const { client, namespace, tunables, isCached } = memwalClientOverride
     ? {
         client: memwalClientOverride,
         namespace: resolveCircleNamespace(circle.circleId, env),
         tunables: loadConfig(env).tunables,
+        isCached: false,
       }
     : createMemWalClient(circle.circleId, env)
 
@@ -1684,12 +1749,14 @@ export async function persistTxDigestAssociationToWalrus(input, env = process.en
       }
     )
 
-    const rememberResult = await client.rememberAndWait(serialized, namespace, {
-      pollIntervalMs: tunables.pollingIntervalMs,
-      timeoutMs: Math.max(tunables.requestTimeoutMs * 4, 90000),
-      idempotencyKey: `${circle.circleId}:txassoc:${resolvedNetwork}:${resolvedCycle}:${normalizeSuiAddress(targetMember.address)}:${trimmedDigest}`,
-      dedupe: true,
-    })
+    const rememberResult = await withWalrusRetry(() =>
+      client.rememberAndWait(serialized, namespace, {
+        pollIntervalMs: tunables.pollingIntervalMs,
+        timeoutMs: Math.max(tunables.requestTimeoutMs * 4, 90000),
+        idempotencyKey: `${circle.circleId}:txassoc:${resolvedNetwork}:${resolvedCycle}:${normalizeSuiAddress(targetMember.address)}:${trimmedDigest}`,
+        dedupe: true,
+      })
+    )
 
     if (!rememberResult || !rememberResult.blob_id) {
       throw new Error('Walrus Memory write for tx_digest_association completed without returning a valid blob_id.')
@@ -1708,7 +1775,7 @@ export async function persistTxDigestAssociationToWalrus(input, env = process.en
       confirmedBy: confirmedByLabel,
     }
   } finally {
-    if (typeof client.destroy === 'function') {
+    if (!isCached && typeof client.destroy === 'function') {
       client.destroy()
     }
   }
@@ -1792,21 +1859,24 @@ export async function persistHistoricalLatenessToWalrus(input, env = process.env
   }
 
   const serialized = serializeMemoryForWalrus(draftRecord)
-  const { client, namespace, tunables } = memwalClientOverride
+  const { client, namespace, tunables, isCached } = memwalClientOverride
     ? {
         client: memwalClientOverride,
         namespace: resolveCircleNamespace(circle.circleId, env),
         tunables: loadConfig(env).tunables,
+        isCached: false,
       }
     : createMemWalClient(circle.circleId, env)
 
   try {
-    const rememberResult = await client.rememberAndWait(serialized, namespace, {
-      pollIntervalMs: tunables.pollingIntervalMs,
-      timeoutMs: Math.max(tunables.requestTimeoutMs * 4, 90000),
-      idempotencyKey,
-      dedupe: true,
-    })
+    const rememberResult = await withWalrusRetry(() =>
+      client.rememberAndWait(serialized, namespace, {
+        pollIntervalMs: tunables.pollingIntervalMs,
+        timeoutMs: Math.max(tunables.requestTimeoutMs * 4, 90000),
+        idempotencyKey,
+        dedupe: true,
+      })
+    )
 
     if (!rememberResult || !rememberResult.blob_id) {
       throw new Error('Walrus Memory write for historical lateness completed without returning a valid blob_id.')
@@ -1823,7 +1893,7 @@ export async function persistHistoricalLatenessToWalrus(input, env = process.env
     recordedLatenessMemories.set(idempotencyKey, saved)
     return saved
   } finally {
-    if (typeof client.destroy === 'function') {
+    if (!isCached && typeof client.destroy === 'function') {
       client.destroy()
     }
   }
@@ -1838,11 +1908,12 @@ export async function recallCircleMemories(circleId, query, options = {}, env = 
     assertCircleNotQuarantined(circleId)
   }
 
-  const { client, namespace, tunables } = options.memwalClientOverride
+  const { client, namespace, tunables, isCached } = options.memwalClientOverride
     ? {
         client: options.memwalClientOverride,
         namespace: resolveCircleNamespace(circleId, env),
         tunables: loadConfig(env).tunables,
+        isCached: false,
       }
     : createMemWalClient(circleId, env)
   try {
@@ -1852,12 +1923,14 @@ export async function recallCircleMemories(circleId, query, options = {}, env = 
         : 'circle agreement grace period member payment pattern reminder preference rule'
 
     const limit = options.limit || tunables.recallLimit
-    const recallRes = await client.recall({
-      query: searchQuery,
-      limit,
-      namespace,
-      sort: options.sort || 'relevance',
-    })
+    const recallRes = await withWalrusRetry(() =>
+      client.recall({
+        query: searchQuery,
+        limit,
+        namespace,
+        sort: options.sort || 'relevance',
+      })
+    )
 
     const records = (recallRes.results || [])
       .filter((hit) => Boolean(hit.blob_id))
@@ -1905,7 +1978,7 @@ export async function recallCircleMemories(circleId, query, options = {}, env = 
       records,
     }
   } finally {
-    if (typeof client.destroy === 'function') {
+    if (!isCached && typeof client.destroy === 'function') {
       client.destroy()
     }
   }
@@ -1988,11 +2061,12 @@ export async function restoreCircleFromWalrus(circleId, options = {}, env = proc
     )
   }
 
-  const { client, namespace, tunables } = options.memwalClientOverride
+  const { client, namespace, tunables, isCached } = options.memwalClientOverride
     ? {
         client: options.memwalClientOverride,
         namespace: resolveCircleNamespace(trimmedCircleId, env),
         tunables: loadConfig(env).tunables,
+        isCached: false,
       }
     : createMemWalClient(trimmedCircleId, env)
 
@@ -2000,7 +2074,7 @@ export async function restoreCircleFromWalrus(circleId, options = {}, env = proc
     const inspectLimit = Math.min(Math.max(Number(options.limit) || tunables.recallLimit || 25, 10), 100)
 
     // Step 1: Trigger relayer restore(namespace, inspectLimit)
-    const rawRestoreRes = await client.restore(namespace, inspectLimit)
+    const rawRestoreRes = await withWalrusRetry(() => client.restore(namespace, inspectLimit))
     const restoreResult = {
       restored: Number(rawRestoreRes?.restored) || 0,
       skipped: Number(rawRestoreRes?.skipped) || 0,
@@ -2025,11 +2099,13 @@ export async function restoreCircleFromWalrus(circleId, options = {}, env = proc
       const MAX_PAGES = 20
       while (hasMore && pages < MAX_PAGES) {
         pages++
-        const page = await client.listMemories({
-          namespace,
-          cursor,
-          limit: 500,
-        })
+        const page = await withWalrusRetry(() =>
+          client.listMemories({
+            namespace,
+            cursor,
+            limit: 500,
+          })
+        )
         const items = Array.isArray(page?.memories) ? page.memories : []
         for (const item of items) {
           if (item?.namespace_id && item.namespace_id !== namespace) continue
@@ -2068,12 +2144,14 @@ export async function restoreCircleFromWalrus(circleId, options = {}, env = proc
     let totalDroppedCount = 0
 
     for (const q of recallQueries) {
-      const recallRes = await client.recall({
-        query: q,
-        limit: recallLimit,
-        namespace,
-        sort: 'recent',
-      })
+      const recallRes = await withWalrusRetry(() =>
+        client.recall({
+          query: q,
+          limit: recallLimit,
+          namespace,
+          sort: 'recent',
+        })
+      )
       totalDroppedCount += Number(recallRes?.dropped_count) || 0
       for (const hit of recallRes?.results || []) {
         const bid = String(hit?.blob_id || '').trim()
@@ -2651,7 +2729,7 @@ export async function restoreCircleFromWalrus(circleId, options = {}, env = proc
         'MemWal retrieval combines restore(namespace, limit), paginated listMemories({ namespace, cursor }) for the blob_id inventory, and targeted semantic recall({ query, limit: 100, sort: "recent" }). Because MemWal restore() is single-shot with a per-owner candidate cap and recall() is similarity-ranked (max 100 per query), complete recovery is verified by comparing recalled blob_ids against listMemories() and checking restoreResult.truncated / failed / dropped_count. Wallet sessions and unconsumed challenges are never stored on Walrus; Tatum is re-queried for all restored transaction digest associations.',
     }
   } finally {
-    if (typeof client.destroy === 'function') {
+    if (!isCached && typeof client.destroy === 'function') {
       client.destroy()
     }
   }
@@ -2679,14 +2757,14 @@ export async function restoreCircleMemoriesFromWalrus(circleId, limit, env = pro
   }
 
   assertCircleNotQuarantined(circleId)
-  const { client, namespace, tunables } = createMemWalClient(circleId, env)
+  const { client, namespace, tunables, isCached } = createMemWalClient(circleId, env)
   try {
     const inspectLimit = limit || tunables.recallLimit
-    const restoreRes = await client.restore(namespace, inspectLimit)
+    const restoreRes = await withWalrusRetry(() => client.restore(namespace, inspectLimit))
     const recalled = await recallCircleMemories(
       circleId,
       'circle agreement member pattern reminder preference verified payment cycle rule',
-      { limit: tunables.recallLimit, sort: 'recent' },
+      { limit: tunables.recallLimit, sort: 'recent', memwalClientOverride: client },
       env
     )
     return {
@@ -2700,16 +2778,20 @@ export async function restoreCircleMemoriesFromWalrus(circleId, limit, env = pro
         'Circle configuration was not found in memory and no authenticatedWalletAddress was provided.',
     }
   } finally {
-    if (typeof client.destroy === 'function') {
+    if (!isCached && typeof client.destroy === 'function') {
       client.destroy()
     }
   }
 }
 
+let lastHealthCheck = null
+let lastHealthCheckTime = 0
+const HEALTH_CACHE_TTL_MS = 15000
+
 /**
  * Check Walrus Memory relayer health and list namespaces for the configured account.
  */
-export async function checkWalrusMemoryHealth(env = process.env) {
+export async function checkWalrusMemoryHealth(env = process.env, options = {}) {
   const cfg = loadConfig(env)
   if (!cfg.integrations.memwal.configured) {
     return {
@@ -2720,10 +2802,15 @@ export async function checkWalrusMemoryHealth(env = process.env) {
     }
   }
 
-  const { client, serviceConfig } = createMemWalClient('health-check', env)
+  const now = Date.now()
+  if (!options.fresh && lastHealthCheck && now - lastHealthCheckTime < HEALTH_CACHE_TTL_MS) {
+    return lastHealthCheck
+  }
+
+  const { client, serviceConfig, isCached } = createMemWalClient('health-check', env)
   try {
-    const health = await client.health()
-    return {
+    const health = await withWalrusRetry(() => client.health())
+    const res = {
       connected: health.status === 'ok',
       configured: true,
       relayerUrl: serviceConfig.MEMWAL_SERVER_URL,
@@ -2732,15 +2819,23 @@ export async function checkWalrusMemoryHealth(env = process.env) {
       writeReady: health.write_ready ?? true,
       mode: health.mode,
     }
+    lastHealthCheck = res
+    lastHealthCheckTime = Date.now()
+    return res
   } catch (err) {
-    return {
+    const res = {
       connected: false,
       configured: true,
       relayerUrl: serviceConfig.MEMWAL_SERVER_URL,
       accountId: serviceConfig.MEMWAL_ACCOUNT_ID,
       error: err.message,
     }
+    lastHealthCheck = res
+    lastHealthCheckTime = Date.now() - (HEALTH_CACHE_TTL_MS - 3000)
+    return res
   } finally {
-    client.destroy()
+    if (!isCached && typeof client.destroy === 'function') {
+      client.destroy()
+    }
   }
 }
