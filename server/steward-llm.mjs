@@ -497,8 +497,49 @@ export async function runPayoutRecommendation(input, options = {}) {
     options,
   })
 
-  const scheduledIndex = (cycle - 1) % members.length
-  const scheduledRecipient = members[scheduledIndex] || members[0]
+  // Track claimed members across the savings rotation.
+  // In an Ajo circle, each member receives the pot at most once.
+  const claimedMemberIdSet = new Set(
+    Array.isArray(input.claimedMemberIds) ? input.claimedMemberIds.map(String) : []
+  )
+
+  const currentCycleNum = Number(cycle) || 1
+  // Infer past cycle recipients from the circle's rotation order:
+  // If cycle is 2 or higher, all preceding cycles 1..(cycle-1) have already had their pot claimed.
+  for (let c = 1; c < currentCycleNum; c++) {
+    const priorRecipient = members[(c - 1) % members.length]
+    if (priorRecipient) {
+      claimedMemberIdSet.add(priorRecipient.id)
+    }
+  }
+
+  // Filter for members who have NOT yet claimed their cycle pot
+  const eligibleMembers = members.filter((m) => !claimedMemberIdSet.has(m.id))
+
+  // If all members in the circle have already claimed, the circle is completed
+  if (eligibleMembers.length === 0) {
+    return {
+      nextRecipient: null,
+      isCompleted: true,
+      rationale: `All ${members.length} members in this circle have received their payout pot. All cycles have been successfully completed.`,
+      memberRisks: members.map((m) => ({
+        member: m,
+        riskLevel: 'Zero Risk',
+        badgeClass: 'bg-utility-success-50 text-utility-success-700 border-utility-success-200',
+        reasoning: 'Cycle payout claimed and completed.',
+        action: 'Circle completed',
+      })),
+      claimedMemberIds: Array.from(claimedMemberIdSet),
+      eligibleMemberIds: [],
+    }
+  }
+
+  // Determine the scheduled recipient:
+  // Must be an eligible member who has not yet claimed.
+  const nominalScheduled = members[(currentCycleNum - 1) % members.length] || members[0]
+  const scheduledRecipient = eligibleMembers.includes(nominalScheduled)
+    ? nominalScheduled
+    : eligibleMembers[0]
 
   const memberEvaluations = members.map((m) => {
     const raw = serverVerifiedByMember.get(m.id) || {
@@ -525,13 +566,24 @@ export async function runPayoutRecommendation(input, options = {}) {
     }
   })
 
+  const claimedNames = members
+    .filter((m) => claimedMemberIdSet.has(m.id))
+    .map((m) => `${m.name} (${m.id})`)
+  const eligibleNames = eligibleMembers.map((m) => `${m.name} (${m.id})`)
+
   const systemPrompt = [
     'You are the Ajo Circle Steward generating a payout & risk recommendation for the current cycle.',
     `Mode: ${withMemory ? 'WITH_MEMORY' : 'WITHOUT_MEMORY (recall disabled)'}.`,
+    'CRITICAL ROTATION INVARIANT: In an Ajo savings circle, each member receives the pot EXACTLY ONCE.',
+    claimedNames.length > 0
+      ? `Members who ALREADY CLAIMED their payout pot in previous cycles: [${claimedNames.join(', ')}]. THESE MEMBERS ARE STRICTLY INELIGIBLE AND MUST NOT BE RECOMMENDED AGAIN UNDER ANY CIRCUMSTANCES.`
+      : 'No members have claimed yet.',
+    `Eligible members who have NOT yet claimed: [${eligibleNames.join(', ')}].`,
+    `You MUST set nextRecipientId to one of the eligible member IDs: [${eligibleMembers.map((m) => m.id).join(', ')}].`,
     'Keep chain facts (Verified, Late, Partial, Pending, Unverified) separate from group policy outcomes.',
     'Respond ONLY with a valid JSON object matching this schema:',
     JSON.stringify({
-      nextRecipientId: 'memberId string',
+      nextRecipientId: 'memberId string (MUST be an eligible member who has not yet claimed)',
       rationale:
         'string explaining the recommendation based on verified chain balances and (if WITH_MEMORY) cited memories',
       memberRisks: [
@@ -552,10 +604,12 @@ export async function runPayoutRecommendation(input, options = {}) {
       {
         role: 'user',
         content: JSON.stringify({
-          cycle,
+          cycle: currentCycleNum,
           withMemory: Boolean(withMemory),
           scheduledRecipientId: scheduledRecipient.id,
           scheduledRecipientName: scheduledRecipient.name,
+          alreadyClaimedMemberIds: Array.from(claimedMemberIdSet),
+          eligibleMemberIds: eligibleMembers.map((m) => m.id),
           RECALLED_MEMORIES: activeMemories.map((m) => ({
             id: m.id,
             walrusBlobId: m.walrusBlobId,
@@ -582,8 +636,11 @@ export async function runPayoutRecommendation(input, options = {}) {
 
   const validated = PayoutRecommendationLlmSchema.parse(rawJson)
   const validBlobs = new Set(activeMemories.map((m) => m.walrusBlobId).filter(Boolean))
-  const nextRecipient =
-    members.find((m) => m.id === validated.nextRecipientId) || scheduledRecipient
+  // Strict enforcement: nextRecipient MUST be an eligible member who has NOT yet claimed
+  let nextRecipient = eligibleMembers.find((m) => m.id === validated.nextRecipientId)
+  if (!nextRecipient) {
+    nextRecipient = scheduledRecipient
+  }
 
   const memberRisks = members.map((m) => {
     const llmRisk = validated.memberRisks.find((r) => r.memberId === m.id)
@@ -618,5 +675,126 @@ export async function runPayoutRecommendation(input, options = {}) {
     nextRecipient,
     rationale: validated.rationale,
     memberRisks,
+    claimedMemberIds: Array.from(claimedMemberIdSet),
+    eligibleMemberIds: eligibleMembers.map((m) => m.id),
+    isCompleted: false,
   }
 }
+
+/**
+ * Run free Group Report summarizing circle verified contributions, cycle progression,
+ * agreements, and risk notes. Open and un-gated (no x402).
+ */
+export async function runGroupReport(input, options = {}) {
+  const { circleId, withMemory = true, windowStart, windowEnd } = input
+  const env = options.env || process.env
+  const cfg = loadConfig(env)
+
+  const circle = getCircleRoster(circleId)
+  if (!circle) {
+    throw new Error(`Circle "${circleId}" is not registered. Activate or configure a circle first.`)
+  }
+
+  const members = circle.members || []
+  const cycle = circle.currentCycle || 1
+
+  const memories = await resolveServerRecalledMemories({
+    circleId,
+    query: `cycle ${cycle} contribution payout agreement grace risk`,
+    withMemory: Boolean(withMemory),
+    cfg,
+    env,
+    options,
+  })
+
+  const serverVerifiedByMember = await resolveServerMemberVerifications({
+    circleId,
+    circle,
+    members,
+    cycle,
+    windowStart,
+    windowEnd,
+    withMemory: Boolean(withMemory),
+    activeMemories: memories,
+    cfg,
+    env,
+    options,
+  })
+
+  const evaluations = members.map((m) => {
+    const raw = serverVerifiedByMember.get(m.id) || {
+      status: 'Unverified',
+      amountReceived: 0,
+    }
+    const policy = evaluateContributionPolicy(raw, {
+      withMemory: Boolean(withMemory),
+      windowEnd: windowEnd || new Date().toISOString(),
+      graceWindowHours: cfg.tunables.graceWindowHours,
+      memories,
+      memberId: m.id,
+      memberName: m.name,
+    })
+    return {
+      name: m.name,
+      address: m.address,
+      chainStatus: raw.status || 'Unverified',
+      policyStatus: policy.policyOutcome || 'Unverified',
+      amountReceived: raw.amountReceived || 0,
+      txDigest: raw.txDigest || null,
+    }
+  })
+
+  const verifiedCount = evaluations.filter((e) => e.chainStatus === 'Verified').length
+  const totalExpected = members.length
+
+  const summary =
+    `Circle "${circle.circleName}" Group Governance & Financial Report. ` +
+    `Cycle ${cycle}: ${verifiedCount} of ${totalExpected} contributions verified on Sui Testnet. ` +
+    `Vault object ID: ${circle.poolAddress || 'Unassigned'}. ` +
+    `Active Walrus memories: ${memories.length}.`
+
+  const reportMarkdown = [
+    `# Ajo Group Steward Report: ${circle.circleName}`,
+    `**Circle ID**: \`${circle.circleId}\`  `,
+    `**Vault Object ID**: \`${circle.poolAddress || 'Unassigned'}\`  `,
+    `**Current Cycle**: ${cycle} | **Cadence**: ${circle.cycleLength || 'Weekly'}  `,
+    `**Contribution per Member**: ${circle.contributionPerMember} ${circle.tokenType || 'SUI'}  `,
+    `**Generated**: ${new Date().toISOString()}  `,
+    '',
+    `## Executive Summary`,
+    summary,
+    '',
+    `## Member Contribution Status`,
+    ...evaluations.map(
+      (m) =>
+        `- **${m.name}** (\`${m.address.slice(0, 8)}...\`): On-chain **${m.chainStatus}** | Policy **${
+          m.policyStatus
+        }** | Paid: ${m.amountReceived} ${circle.tokenType || 'SUI'} ${
+          m.txDigest ? `(\`${m.txDigest.slice(0, 8)}...\`)` : ''
+        }`
+    ),
+    '',
+    `## Walrus Governance Context (${memories.length} records)`,
+    ...(memories.length > 0
+      ? memories.map(
+          (m) =>
+            `- [${m.category}] **${m.title}**: "${m.quote}" (Blob: \`${m.walrusBlobId || 'local'}\`)`
+        )
+      : ['- No exception or grace agreements recorded in Walrus. Strict timestamp rules apply.']),
+  ].join('\n')
+
+  return {
+    circleId: circle.circleId,
+    circleName: circle.circleName,
+    poolAddress: circle.poolAddress,
+    currentCycle: cycle,
+    generatedAt: new Date().toISOString(),
+    summary,
+    verifiedContributionsCount: verifiedCount,
+    totalExpectedContributions: totalExpected,
+    agreementsCount: memories.length,
+    memberBreakdown: evaluations,
+    reportMarkdown,
+  }
+}
+

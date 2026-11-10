@@ -2,11 +2,23 @@ module.exports = {
   "theme": {
     "extend": {
       "colors": {
+        "brand-50": "var(--color-brand-50)",
+        "brand-100": "var(--color-brand-100)",
+        "brand-200": "var(--color-brand-200)",
+        "brand-300": "var(--color-brand-300)",
+        "brand-400": "var(--color-brand-400)",
+        "brand-500": "var(--color-brand-500)",
+        "brand-600": "var(--color-brand-600)",
+        "brand-700": "var(--color-brand-700)",
+        "brand-800": "var(--color-brand-800)",
+        "brand-900": "var(--color-brand-900)",
+        "brand-950": "var(--color-brand-950)",
         "utility-gray-50": "var(--color-utility-gray-50)",
         "utility-gray-200": "var(--color-utility-gray-200)",
         "utility-gray-600": "var(--color-utility-gray-600)",
         "utility-gray-700": "var(--color-utility-gray-700)",
         "utility-brand-50": "var(--color-utility-brand-50)",
+        "utility-brand-100": "var(--color-utility-brand-100)",
         "utility-brand-200": "var(--color-utility-brand-200)",
         "utility-brand-600": "var(--color-utility-brand-600)",
         "utility-brand-700": "var(--color-utility-brand-700)",
@@ -33,6 +45,7 @@ module.exports = {
         "overlay": "var(--color-bg-overlay)",
         "brand-solid": "var(--color-bg-brand-solid)",
         "brand-solid-hover": "var(--color-bg-brand-solid-hover)",
+        "brand-subtle": "var(--color-bg-brand-subtle)",
         "error-primary": "var(--color-bg-error-primary)",
         "warning-primary": "var(--color-bg-warning-primary)",
         "success-primary": "var(--color-bg-success-primary)",
@@ -50,6 +63,7 @@ module.exports = {
         "placeholder": "var(--color-text-placeholder)",
         "disabled": "var(--color-text-disabled)",
         "brand-primary": "var(--color-text-brand-primary)",
+        "brand-hover": "var(--color-text-brand-hover)",
         "error-primary": "var(--color-text-error-primary)",
         "warning-primary": "var(--color-text-warning-primary)",
         "success-primary": "var(--color-text-success-primary)",
@@ -69,7 +83,10 @@ module.exports = {
         "primary": "var(--color-border-primary)",
         "secondary": "var(--color-border-secondary)",
         "brand": "var(--color-border-brand)",
-        "error-subtle": "var(--color-border-error-subtle)"
+        "brand-subtle": "var(--color-border-brand-subtle)",
+        "error-subtle": "var(--color-border-error-subtle)",
+        "warning-subtle": "var(--color-border-warning-subtle)",
+        "success-subtle": "var(--color-border-success-subtle)"
       },
       "ringColor": {
         "focus-ring": "var(--color-ring-focus-ring)",
@@ -83,7 +100,7 @@ module.exports = {
         "md": "var(--radius-md)",
         "lg": "var(--radius-lg)",
         "xl": "var(--radius-xl)",
-        "2xl": "1rem",
+        "2xl": "var(--radius-2xl)",
         "3xl": "var(--radius-3xl)",
         "4xl": "var(--radius-4xl)",
         "full": "var(--radius-full)"
@@ -110,7 +127,8 @@ module.exports = {
         "11xl": "var(--space-11xl)"
       },
       "fontFamily": {
-        "sans": "var(--font-family-sans)"
+        "sans": "var(--font-family-sans)",
+        "mono": "var(--font-family-mono)"
       },
       "fontSize": {
         "xs": [
@@ -146,39 +164,52 @@ module.exports = {
         "heading-xs": [
           "var(--font-size-heading-xs)",
           {
-            "lineHeight": "var(--line-height-heading-xs)"
+            "lineHeight": "var(--line-height-heading-xs)",
+            "letterSpacing": "var(--letter-spacing-heading-h3)"
           }
         ],
         "heading-sm": [
           "var(--font-size-heading-sm)",
           {
-            "lineHeight": "var(--line-height-heading-sm)"
+            "lineHeight": "var(--line-height-heading-sm)",
+            "letterSpacing": "var(--letter-spacing-heading-h2)"
           }
         ],
         "heading-md": [
           "var(--font-size-heading-md)",
           {
-            "lineHeight": "var(--line-height-heading-md)"
+            "lineHeight": "var(--line-height-heading-md)",
+            "letterSpacing": "var(--letter-spacing-heading-h2)"
           }
         ],
         "heading-lg": [
           "var(--font-size-heading-lg)",
           {
-            "lineHeight": "var(--line-height-heading-lg)"
+            "lineHeight": "var(--line-height-heading-lg)",
+            "letterSpacing": "var(--letter-spacing-heading-h1)"
           }
         ],
         "heading-xl": [
           "var(--font-size-heading-xl)",
           {
-            "lineHeight": "var(--line-height-heading-xl)"
+            "lineHeight": "var(--line-height-heading-xl)",
+            "letterSpacing": "var(--letter-spacing-heading-h1)"
           }
         ],
         "heading-2xl": [
           "var(--font-size-heading-2xl)",
           {
-            "lineHeight": "var(--line-height-heading-2xl)"
+            "lineHeight": "var(--line-height-heading-2xl)",
+            "letterSpacing": "var(--letter-spacing-heading-h1)"
           }
         ]
+      },
+      "letterSpacing": {
+        "tightest": "var(--letter-spacing-heading-h1)",
+        "tighter": "var(--letter-spacing-heading-h2)",
+        "tight": "var(--letter-spacing-heading-h3)",
+        "normal": "var(--letter-spacing-normal)",
+        "wide": "var(--letter-spacing-wide)"
       },
       "fontWeight": {
         "regular": "var(--font-weight-regular)",

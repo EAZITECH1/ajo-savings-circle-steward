@@ -157,6 +157,11 @@ router.post('/challenge', (req, res) => {
       memberId: body.memberId,
       memberAddress: session.walletAddress,
     })
+    if (body.memberId && member.id !== String(body.memberId).trim()) {
+      return res.status(403).json({
+        error: `Authorization mismatch: Connected wallet (${session.walletAddress}) belongs to ${member.name} (${member.id}), but the request attempted to confirm on behalf of member ID "${body.memberId}". Member impersonation is strictly forbidden.`,
+      })
+    }
     const challenge = issueConfirmationChallenge({
       circleId: body.circleId,
       proposalId: body.proposalId,
@@ -177,6 +182,11 @@ router.post('/confirm', async (req, res) => {
       memberId: body.memberId,
       memberAddress: session.walletAddress,
     })
+    if (body.memberId && member.id !== String(body.memberId).trim()) {
+      return res.status(403).json({
+        error: `Authorization mismatch: Connected wallet (${session.walletAddress}) belongs to ${member.name} (${member.id}), but the request attempted to confirm on behalf of member ID "${body.memberId}". Member impersonation is strictly forbidden.`,
+      })
+    }
     const record = await confirmAndWriteMemory({
       ...body,
       memberId: member.id,

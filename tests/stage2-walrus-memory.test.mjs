@@ -1,6 +1,8 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519'
+import { Secp256k1Keypair } from '@mysten/sui/keypairs/secp256k1'
+import { Secp256r1Keypair } from '@mysten/sui/keypairs/secp256r1'
 import {
   resolveCircleNamespace,
   upsertCircleRoster,
@@ -299,6 +301,38 @@ test('Sui wallet signature binding: accepts matching wallet signature, rejects u
     headers: { authorization: `Bearer ${session.token}` },
   })
   assert.equal(verifiedReqSession.walletAddress, addr1)
+})
+
+test('Multi-scheme Sui wallet signature verification: verifies real Ed25519, Secp256k1, and Secp256r1/Passkey/zkLogin wallet signatures', async () => {
+  const schemes = [
+    { name: 'Ed25519', kp: new Ed25519Keypair() },
+    { name: 'Secp256k1', kp: new Secp256k1Keypair() },
+    { name: 'Secp256r1', kp: new Secp256r1Keypair() },
+  ]
+
+  for (const { name, kp } of schemes) {
+    const address = kp.getPublicKey().toSuiAddress()
+    const challenge = issueWalletAuthChallenge({ address })
+    const signed = await kp.signPersonalMessage(new TextEncoder().encode(challenge.message))
+    
+    // Verify server-side
+    const session = await verifyWalletAuthChallenge({
+      challengeId: challenge.challengeId,
+      address,
+      signature: signed.signature,
+    })
+    assert.ok(session.token, `${name} session should have token`)
+    assert.equal(session.walletAddress, address, `${name} address must match`)
+
+    // Verify direct verification helper
+    const directRes = await verifySuiAddressSignature({
+      message: challenge.message,
+      expectedAddress: address,
+      signature: signed.signature,
+    })
+    assert.equal(directRes.verified, true, `${name} direct verification must succeed`)
+    assert.equal(directRes.address, address, `${name} verified address must match`)
+  }
 })
 
 test('Walrus Memory: serializes and parses recalled memory with real blob_id and metadata intact', () => {

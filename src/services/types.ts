@@ -30,7 +30,7 @@ export interface VerificationParams {
 
 export interface VerificationResult {
   status: CycleStatus
-  code?: 'verified' | 'partial' | 'wrong_token' | 'wrong_amount' | 'late' | 'pending' | 'unverified'
+  code?: 'verified' | 'partial' | 'wrong_token' | 'wrong_amount' | 'late' | 'pending' | 'indexing_pending' | 'unverified'
   txDigest?: string
   txDigests?: string[]
   amountReceived?: number
@@ -113,6 +113,9 @@ export interface WalrusRestoreOutcome {
     currentCycle: number
     organizerAddress: string
     members: Member[]
+    timeZone?: string
+    windowStart?: string
+    windowEnd?: string
     version?: number
     configHash?: string
     walrusConfigBlobId?: string

@@ -110,6 +110,17 @@ export function normalizeCoinType(coinType) {
  * @param {string | number} input.expected.windowEnd
  * @param {number} [input.partialPaymentWindowHours=48]
  */
+export function formatElapsedDuration(elapsedMs) {
+  if (!Number.isFinite(elapsedMs) || elapsedMs <= 0) return '0 hours late'
+  const totalHours = Math.floor(elapsedMs / (3600 * 1000))
+  const days = Math.floor(totalHours / 24)
+  const hours = totalHours % 24
+  if (days > 0) {
+    return `${days} day${days === 1 ? '' : 's'}, ${hours} hour${hours === 1 ? '' : 's'} late`
+  }
+  return `${hours} hour${hours === 1 ? '' : 's'} late`
+}
+
 export function classifyChainContribution(input) {
   const {
     lookupStatus,
@@ -261,8 +272,23 @@ export function classifyChainContribution(input) {
   // Sort chronologically by timestampMs
   const sorted = [...matchingTokenTransfers].sort((a, b) => a.timestampMs - b.timestampMs)
 
-  // Check if any transfer occurred before windowStartMs
-  const beforeWindow = sorted.find((t) => t.timestampMs < windowStartMs)
+  // Window start validation:
+  // Allow a 60-second grace buffer for clock skew around windowStart (or circle createdAt if provided).
+  // Strictly disallow transactions that predated this circle/cycle window, as they belong to
+  // earlier circles or prior cycles that shared the same vault address.
+  const createdAtMs = expected.createdAt
+    ? (typeof expected.createdAt === 'number' ? expected.createdAt : Date.parse(expected.createdAt))
+    : NaN
+  const effectiveStartMs = Number.isFinite(createdAtMs) && Number.isFinite(windowStartMs)
+    ? Math.max(createdAtMs, windowStartMs)
+    : Number.isFinite(createdAtMs)
+    ? createdAtMs
+    : windowStartMs
+  const clockSkewBufferMs = 60 * 1000
+  const minValidTimestampMs = effectiveStartMs - clockSkewBufferMs
+
+  // Check if any transfer occurred before minValidTimestampMs
+  const beforeWindow = sorted.find((t) => t.timestampMs < minValidTimestampMs)
   if (beforeWindow) {
     return {
       status: 'Unverified',
@@ -273,7 +299,7 @@ export function classifyChainContribution(input) {
       tokenReceived: beforeWindow.tokenType,
       timestamp: new Date(beforeWindow.timestampMs).toISOString(),
       error: 'Transaction timestamp predates the cycle window start.',
-      rawNotes: `Transaction ${beforeWindow.txDigest} occurred at ${new Date(beforeWindow.timestampMs).toISOString()}, before cycle window start ${new Date(windowStartMs).toISOString()}.`,
+      rawNotes: `Transaction ${beforeWindow.txDigest} occurred at ${new Date(beforeWindow.timestampMs).toISOString()}, before cycle window start ${new Date(windowStartMs).toISOString()}. It may belong to a prior circle or cycle.`,
     }
   }
 
@@ -291,16 +317,31 @@ export function classifyChainContribution(input) {
   // Epsilon for floating point comparison
   const eps = 1e-6
 
+  const onTimeTransfers = sorted.filter((t) => t.timestampMs <= windowEndMs)
+  const lateTransfers = sorted.filter((t) => t.timestampMs > windowEndMs)
+  const amountPaidByDeadline = onTimeTransfers.reduce((acc, t) => acc + t.amount, 0)
+  const amountPaidAfterDeadline = lateTransfers.reduce((acc, t) => acc + t.amount, 0)
+  const amountRemainingOutstanding = Math.max(0, expected.expectedAmount - totalAmount)
+  const deadlineIso = new Date(windowEndMs).toISOString()
+
   if (totalAmount + eps < expected.expectedAmount) {
+    const isPastDeadline = Boolean(input.isPastDeadline || (lastTx && lastTx.timestampMs > windowEndMs))
     return {
-      status: 'Partial',
-      code: 'partial',
+      status: isPastDeadline ? 'MissedDeadline' : 'Partial',
+      code: isPastDeadline ? 'missed_deadline' : 'partial',
       txDigest: primaryDigest,
       txDigests: digests,
       amountReceived: totalAmount,
+      amountPaidByDeadline,
+      amountPaidAfterDeadline,
+      amountRemainingOutstanding,
+      deadlineTimestamp: deadlineIso,
+      missedDeadline: isPastDeadline,
       tokenReceived: lastTx.tokenType,
       timestamp: latestIso,
-      rawNotes: `Received ${totalAmount} of expected ${expected.expectedAmount} (${sorted.length} payment${sorted.length > 1 ? 's' : ''}).`,
+      rawNotes: isPastDeadline
+        ? `Missed deadline: paid ${totalAmount} of expected ${expected.expectedAmount} (${amountPaidByDeadline} by deadline); ${amountRemainingOutstanding} remains outstanding.`
+        : `Received ${totalAmount} of expected ${expected.expectedAmount} (${sorted.length} payment${sorted.length > 1 ? 's' : ''}).`,
     }
   }
 
@@ -311,13 +352,50 @@ export function classifyChainContribution(input) {
       txDigest: primaryDigest,
       txDigests: digests,
       amountReceived: totalAmount,
+      expectedAmount: expected.expectedAmount,
+      isOverpayment: true,
+      amountPaidByDeadline,
+      amountPaidAfterDeadline,
+      amountRemainingOutstanding: 0,
+      deadlineTimestamp: deadlineIso,
       tokenReceived: lastTx.tokenType,
       timestamp: latestIso,
-      rawNotes: `Received ${totalAmount}, which exceeds expected ${expected.expectedAmount}.`,
+      rawNotes: `Overpayment on-chain: received ${totalAmount}, which exceeds expected ${expected.expectedAmount}.`,
     }
   }
 
-  // Exact amount reached across 2+ partial payments: check partialPaymentWindowHours
+  // Check deadline (windowEndMs)
+  if (lastTx.timestampMs > windowEndMs) {
+    const elapsedMs = lastTx.timestampMs - windowEndMs
+    const hoursLate = Number((elapsedMs / 3600000).toFixed(1))
+    const elapsedDisplay = formatElapsedDuration(elapsedMs)
+
+    return {
+      status: 'Late',
+      code: 'late',
+      txDigest: primaryDigest,
+      txDigests: digests,
+      amountReceived: totalAmount,
+      amountPaidByDeadline,
+      amountPaidAfterDeadline,
+      amountRemainingOutstanding: 0,
+      deadlineTimestamp: deadlineIso,
+      latePaymentDigest: lastTx.txDigest,
+      latePaymentTimestamp: latestIso,
+      elapsedMs,
+      elapsedDisplay,
+      isLateCompletion: true,
+      tokenReceived: lastTx.tokenType,
+      timestamp: latestIso,
+      hoursLate,
+      rawNotes:
+        sorted.length > 1
+          ? `Split payments (${sorted.length} tranches) completed ${elapsedDisplay} (${amountPaidByDeadline} paid by deadline).`
+          : `Payment arrived ${elapsedDisplay}.`,
+    }
+  }
+
+  // Exact amount reached across 2+ partial payments within window: check partialPaymentWindowHours
   if (sorted.length > 1 && splitSpanMs > maxSplitSpanMs) {
     return {
       status: 'Partial',
@@ -325,28 +403,13 @@ export function classifyChainContribution(input) {
       txDigest: primaryDigest,
       txDigests: digests,
       amountReceived: totalAmount,
+      amountPaidByDeadline,
+      amountPaidAfterDeadline,
+      amountRemainingOutstanding,
+      deadlineTimestamp: deadlineIso,
       tokenReceived: lastTx.tokenType,
       timestamp: latestIso,
       rawNotes: `Split payments totaled ${totalAmount}, but elapsed time between tranches (${(splitSpanMs / 3600000).toFixed(1)}h) exceeded the ${partialPaymentWindowHours}h partial-payment window.`,
-    }
-  }
-
-  // Check deadline (windowEndMs)
-  if (lastTx.timestampMs > windowEndMs) {
-    const hoursLate = ((lastTx.timestampMs - windowEndMs) / 3600000).toFixed(1)
-    return {
-      status: 'Late',
-      code: 'late',
-      txDigest: primaryDigest,
-      txDigests: digests,
-      amountReceived: totalAmount,
-      tokenReceived: lastTx.tokenType,
-      timestamp: latestIso,
-      hoursLate: Number(hoursLate),
-      rawNotes:
-        sorted.length > 1
-          ? `Split payments (${sorted.length} tranches) completed ${hoursLate}h after cycle deadline.`
-          : `Payment arrived ${hoursLate}h after cycle deadline.`,
     }
   }
 
@@ -356,6 +419,10 @@ export function classifyChainContribution(input) {
     txDigest: primaryDigest,
     txDigests: digests,
     amountReceived: totalAmount,
+    amountPaidByDeadline: totalAmount,
+    amountPaidAfterDeadline: 0,
+    amountRemainingOutstanding: 0,
+    deadlineTimestamp: deadlineIso,
     tokenReceived: lastTx.tokenType,
     timestamp: latestIso,
     rawNotes:
@@ -515,12 +582,17 @@ export function evaluateContributionPolicy(chainResult, options) {
   }
 
   if (chainStatus === 'WrongAmount') {
+    const isOverpayment = (chainResult.amountReceived ?? 0) > (chainResult.expectedAmount ?? 0)
     return {
       chainStatus: 'WrongAmount',
-      policyStatus: 'Rejected (Wrong amount)',
+      policyStatus: isOverpayment
+        ? 'Rejected (Overpayment / amount mismatch)'
+        : 'Rejected (Wrong amount)',
       policyVerdict: 'rejected',
       countsTowardPot: false,
-      policyReason: chainResult.rawNotes || 'Transfer amount did not match circle contribution rule.',
+      policyReason: chainResult.rawNotes || (isOverpayment
+        ? `Overpayment on-chain: received ${chainResult.amountReceived}, which exceeds circle rule of ${chainResult.expectedAmount}.`
+        : 'Transfer amount did not match circle contribution rule.'),
       citedMemory: null,
     }
   }

@@ -16,6 +16,7 @@ import authRoutes from './routes/auth.mjs'
 import tatumRoutes from './routes/tatum.mjs'
 import memoryRoutes from './routes/memory.mjs'
 import stewardRoutes from './routes/steward.mjs'
+import ajoRoutes from './routes/ajo.mjs'
 import { credentialGuard } from './credential-guard.mjs'
 import { loadDotEnvIfPresent, loadConfig } from './config.mjs'
 
@@ -75,6 +76,7 @@ app.use('/api/auth', authRoutes)
 app.use('/api/tatum', tatumRoutes)
 app.use('/api/memory', memoryRoutes)
 app.use('/api/steward', stewardRoutes)
+app.use('/api/ajo', ajoRoutes)
 
 const server = createHttpServer(app)
 
@@ -88,6 +90,9 @@ const vite = await createViteServer({
   server: {
     middlewareMode: true,
     hmr: { server },
+    watch: {
+      ignored: ['**/.env*', '**/data/**', '**/contracts/**'],
+    },
     // Allow any Host — the preview is served on a per-project subdomain this file
     // cannot know. Must be the boolean `true` or an array; the string 'all' is
     // iterated per-character and silently blocks everything (no warning, no error).

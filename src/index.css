@@ -9,7 +9,9 @@
 /* Tatum foundation — read through the tokens, never hardcoded. The full system
    (component anatomy, states, layout) is in the `tatum-design` skill. */
 body {
-  background-color: var(--color-bg-primary);
+  background-color: var(--color-bg-secondary);
   color: var(--color-text-primary);
   font-family: var(--font-family-sans);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }

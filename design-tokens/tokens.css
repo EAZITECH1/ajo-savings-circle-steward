@@ -1,202 +1,279 @@
 /**
- * Do not edit directly, this file was auto-generated.
+ * Ajo Savings Circle Steward Design Tokens
+ * Typography & Blue-and-White Palette
+ * Inspired by Revior typographic character: Google Sans Flex & Code, calm hierarchy,
+ * deep navy text, full blue scale, and crisp white/light-blue tinted surfaces.
  */
 
 :root {
-  --color-text-primary: #0a1128; /** Deep navy near-black. */
-  --color-text-secondary: #4b5563; /** Mid-gray secondary text. */
-  --color-text-tertiary: #6b7280; /** Helper copy, descriptions. */
-  --color-text-quaternary: #9ca3af; /** Lowest-emphasis text. */
-  --color-text-primary-on-brand: #ffffff; /** Text on blue brand fills. */
-  --color-text-placeholder: #9ca3af; /** Input placeholder text. */
-  --color-text-disabled: #9ca3af; /** Text in disabled controls. */
-  --color-text-brand-primary: #0067f5; /** Primary fintech blue. */
-  --color-text-error-primary: #ef4444; /** True default only red. */
-  --color-text-warning-primary: #d97706; /** Amber for Pending / Partial. */
-  --color-text-success-primary: #10b981; /** Green for Verified. */
-  --color-fg-primary: #0a1128; /** Strongest icon color. */
-  --color-fg-secondary: #4b5563; /** Icons paired with secondary text. */
-  --color-fg-tertiary: #6b7280; /** Supporting icons. */
-  --color-fg-quaternary: #9ca3af; /** Default utility-icon color. */
-  --color-fg-quaternary-hover: #4b5563; /** Utility icon on hover. */
-  --color-fg-brand-primary: #0067f5; /** Brand-emphasised blue icons. */
-  --color-fg-error-primary: #ef4444; /** Error status icons. */
-  --color-fg-warning-primary: #d97706; /** Warning status icons. */
-  --color-fg-success-primary: #10b981; /** Success status icons. */
-  --color-fg-disabled: #d1d5db; /** Icons in disabled controls. */
-  --color-fg-white: #ffffff; /** Icons on solid brand/status fills. */
-  --color-bg-primary: #ffffff; /** Clean white card surface. */
-  --color-bg-primary-hover: #f9fafb; /** Hovered canvas surface. */
-  --color-bg-primary-solid: #0a1128; /** Solid dark navy. */
-  --color-bg-secondary: #f4f6fa; /** Very light cool-gray page canvas. */
-  --color-bg-secondary-hover: #eaedf3; /** Hovered grouped surface. */
-  --color-bg-tertiary: #e2e8f0; /** Nested/subtle raised surfaces. */
-  --color-bg-overlay: #0a1128; /** Modal backdrop scrim. */
-  --color-bg-brand-solid: #0067f5; /** Nigerian fintech primary blue #0067f5. */
-  --color-bg-brand-solid-hover: #0056cc; /** Primary blue hover. */
-  --color-bg-error-primary: #fef2f2; /** Pale red tint for true defaults. */
-  --color-bg-warning-primary: #fffbeb; /** Pale amber tint. */
+  /* Brand Full Blue Scale (50-950) */
+  --color-brand-50: #eff6ff; /** Ultra-soft ice blue tint for backgrounds & highlight washes. */
+  --color-brand-100: #dbeafe; /** Light blue border, pill active hover. */
+  --color-brand-200: #bfdbfe; /** Soft blue border, badge outline. */
+  --color-brand-300: #93c5fd; /** Mid light blue accent. */
+  --color-brand-400: #60a5fa; /** Bright sky blue. */
+  --color-brand-500: #3b82f6; /** Core vibrant blue. */
+  --color-brand-600: #0067f5; /** Trustworthy primary blue for buttons, active links, hero surfaces. */
+  --color-brand-700: #0052cc; /** Primary blue hover and pressed state. */
+  --color-brand-800: #1d4ed8; /** Deep blue accent. */
+  --color-brand-900: #1e3a8a; /** Dark navy blue surface. */
+  --color-brand-950: #0c1938; /** Deepest navy ink. */
+
+  /* Text Colors — Deep navy for headings/body, mid blue-gray for secondary (no pure black) */
+  --color-text-primary: #0c1938; /** Deep navy for headings and primary body (WCAG AAA 16.7:1). */
+  --color-text-secondary: #475569; /** Mid blue-gray for secondary labels and descriptions (WCAG AA 5.5:1). */
+  --color-text-tertiary: #64748b; /** Cool blue-slate helper copy and metadata (WCAG AA 4.6:1). */
+  --color-text-quaternary: #8a9bb2; /** Lowest-emphasis tags and captions. */
+  --color-text-primary-on-brand: #ffffff; /** Pure white text on blue brand fills (WCAG AA 4.7:1). */
+  --color-text-placeholder: #8a9bb2; /** Input placeholder text. */
+  --color-text-disabled: #94a3b8; /** Text in disabled controls. */
+  --color-text-brand-primary: #0067f5; /** Primary blue text and links. */
+  --color-text-brand-hover: #0052cc; /** Primary blue hover text. */
+
+  /* Functional Status Text Colors */
+  --color-text-error-primary: #b91c1c; /** Red text for true defaults only (WCAG AA 5.6:1). */
+  --color-text-warning-primary: #b45309; /** Amber text for Pending / Partial (WCAG AA 5.3:1). */
+  --color-text-success-primary: #047857; /** Green text for Verified (WCAG AA 5.8:1). */
+
+  /* Foreground / Icons */
+  --color-fg-primary: #0c1938; /** Deep navy icon color. */
+  --color-fg-secondary: #475569; /** Icons paired with secondary text. */
+  --color-fg-tertiary: #64748b; /** Supporting icons. */
+  --color-fg-quaternary: #8a9bb2; /** Default utility icons. */
+  --color-fg-quaternary-hover: #475569; /** Utility icons on hover. */
+  --color-fg-brand-primary: #0067f5; /** Brand-emphasized primary blue icons. */
+  --color-fg-error-primary: #b91c1c; /** True default error icons. */
+  --color-fg-warning-primary: #b45309; /** Warning status icons. */
+  --color-fg-success-primary: #047857; /** Success status icons. */
+  --color-fg-disabled: #cbd5e1; /** Icons in disabled controls. */
+  --color-fg-white: #ffffff; /** Icons on solid brand fills. */
+
+  /* Backgrounds — White and very light blue tints only */
+  --color-bg-primary: #ffffff; /** Clean, pure white card and panel surface. */
+  --color-bg-primary-hover: #f8fafd; /** Subtle ice-blue tint on card hover. */
+  --color-bg-primary-solid: #0c1938; /** Solid deep navy for dark contrast accents. */
+  --color-bg-secondary: #f8fafd; /** Very light ice-blue tint page canvas. */
+  --color-bg-secondary-hover: #f0f5fc; /** Hovered grouped surfaces. */
+  --color-bg-tertiary: #eaf1fa; /** Nested or subtly raised container surfaces. */
+  --color-bg-overlay: #0c1938; /** Modal backdrop scrim. */
+  --color-bg-brand-solid: #0067f5; /** Primary trustworthy blue fill. */
+  --color-bg-brand-solid-hover: #0052cc; /** Primary blue hover. */
+  --color-bg-brand-subtle: #eff6ff; /** Light blue wash for active navigation & badges. */
+  --color-bg-disabled-subtle: #f1f5fa; /** Disabled control background. */
+
+  /* Functional Status Backgrounds */
+  --color-bg-error-primary: #fef2f2; /** Pale red tint for true defaults only. */
+  --color-bg-warning-primary: #fffbeb; /** Pale amber tint for pending/partial. */
   --color-bg-success-primary: #ecfdf5; /** Pale green tint for verified. */
   --color-bg-error-secondary: #fee2e2; /** Secondary error tint. */
   --color-bg-warning-secondary: #fef3c7; /** Secondary warning tint. */
   --color-bg-success-secondary: #d1fae5; /** Secondary success tint. */
-  --color-bg-disabled-subtle: #f3f4f6; /** Disabled control surface. */
-  --color-border-primary: #e5e7eb; /** Subtle borders. */
-  --color-border-secondary: #edf0f5; /** Soft row dividers. */
+
+  /* Borders — Soft cool ice-blue grays & brand blue */
+  --color-border-primary: #e2eaf4; /** Clean cool border for cards and controls. */
+  --color-border-secondary: #edf3fa; /** Soft table and divider lines. */
   --color-border-brand: #0067f5; /** Primary blue outline. */
-  --color-border-error-subtle: #fca5a5; /** Red outline. */
-  --color-ring-focus-ring: #0067f5; /** Focus ring in primary blue. */
-  --color-ring-focus-ring-error: #ef4444; /** Focus ring on error. */
-  --color-utility-gray-50: #f8fafc; /** Soft cool gray tint. */
-  --color-utility-gray-200: #e2e8f0; /** Soft cool gray border. */
-  --color-utility-gray-600: #64748b; /** Gray accent text. */
-  --color-utility-gray-700: #334155; /** Gray badge label. */
-  --color-utility-brand-50: #eff6ff; /** Soft primary blue tint. */
-  --color-utility-brand-200: #bfdbfe; /** Soft blue border. */
-  --color-utility-brand-600: #0067f5; /** Blue accent text. */
-  --color-utility-brand-700: #0056cc; /** Darker blue badge text. */
+  --color-border-brand-subtle: #bfdbfe; /** Soft light-blue border for active pills. */
+  --color-border-error-subtle: #fecaca; /** Pale red outline. */
+  --color-border-warning-subtle: #fde68a; /** Pale amber outline. */
+  --color-border-success-subtle: #a7f3d0; /** Pale green outline. */
+
+  /* Rings & Focus */
+  --color-ring-focus-ring: #0067f5; /** Keyboard focus ring in primary blue. */
+  --color-ring-focus-ring-error: #b91c1c; /** Keyboard focus ring on invalid inputs. */
+
+  /* Utility Palettes */
+  --color-utility-gray-50: #f8fafd; /** Ice-gray tint surface. */
+  --color-utility-gray-200: #e2eaf4; /** Ice-gray border. */
+  --color-utility-gray-600: #475569; /** Mid blue-gray accent text. */
+  --color-utility-gray-700: #1e293b; /** Deep slate badge text. */
+
+  --color-utility-brand-50: #eff6ff; /** Soft primary blue wash. */
+  --color-utility-brand-100: #dbeafe; /** Light blue pill wash. */
+  --color-utility-brand-200: #bfdbfe; /** Soft primary blue border. */
+  --color-utility-brand-600: #0067f5; /** Primary blue accent text. */
+  --color-utility-brand-700: #0052cc; /** Primary blue badge text. */
+
   --color-utility-success-50: #ecfdf5; /** Green surface for verified. */
   --color-utility-success-200: #a7f3d0; /** Green border. */
   --color-utility-success-600: #059669; /** Green accent text. */
   --color-utility-success-700: #047857; /** Green badge text. */
+
   --color-utility-warning-50: #fffbeb; /** Amber surface for pending/partial. */
   --color-utility-warning-200: #fde68a; /** Amber border. */
   --color-utility-warning-600: #d97706; /** Amber accent text. */
   --color-utility-warning-700: #b45309; /** Amber badge text. */
+
   --color-utility-error-50: #fef2f2; /** Red surface for default only. */
   --color-utility-error-200: #fecaca; /** Red border. */
   --color-utility-error-600: #dc2626; /** Red accent text. */
   --color-utility-error-700: #b91c1c; /** Red badge text. */
-  --space-none: 0rem; /** Zero gap — flush/adjacent elements. */
-  --space-xxs: 0.125rem; /** Hairline gap between tightly-coupled marks (icon + label). */
-  --space-xs: 0.25rem; /** Tightest control padding; icon insets. */
-  --space-sm: 0.375rem; /** Compact control padding; dense chip/badge insets. */
-  --space-md: 0.5rem; /** Default gap inside compact controls. */
-  --space-md-lg: 0.625rem; /** Between compact and comfortable control padding. */
-  --space-lg: 0.75rem; /** Comfortable control padding; small stack gaps. */
-  --space-lg-xl: 0.875rem; /** Between control and container padding. */
-  --space-xl: 1rem; /** Default card/container padding; primary stack gap. */
-  --space-2xl: 1.25rem; /** Roomy card padding. */
-  --space-3xl: 1.5rem; /** Section padding; gap between major regions. */
-  --space-4xl: 2rem; /** Generous section padding on desktop. */
-  --space-5xl: 2.5rem; /** Page-level vertical rhythm. */
-  --space-6xl: 3rem; /** Large landing/section rhythm. */
-  --space-7xl: 4rem; /** Marketing section spacing. */
-  --space-8xl: 5rem; /** Hero vertical spacing. */
-  --space-9xl: 6rem; /** Large hero spacing. */
-  --space-10xl: 8rem; /** Oversized editorial spacing. */
-  --space-11xl: 10rem; /** Maximum layout spacing. */
-  --radius-none: 0rem; /** Square corners. */
-  --radius-xxs: 0.125rem; /** Barely-rounded marks. */
-  --radius-xs: 0.25rem; /** Small chips, tags, tiny controls. */
-  --radius-sm: 0.375rem; /** Compact controls. */
-  --radius-md: 0.5rem; /** Inputs, badges, tooltips, menu items, compact controls. */
-  --radius-lg: 0.625rem; /** Buttons, dialogs, floating menus. */
-  --radius-xl: 0.75rem; /** Cards, tables, panels, alerts, drawers. */
-  --radius-2xl: 1rem; /** Occasional oversized/rounded surfaces. */
-  --radius-3xl: 1.25rem; /** Extra-large surfaces. */
-  --radius-4xl: 1.5rem; /** Feature/marketing surfaces. */
-  --radius-full: 9999px; /** Pills, avatars, circular controls. */
-  --font-size-xs: 0.75rem; /** Captions, table sublabels, dense metadata. */
-  --font-size-sm: 0.875rem; /** Controls, table cells, dense body. */
-  --font-size-md: 1rem; /** Default readable body. */
-  --font-size-lg: 1.125rem; /** Larger descriptions, modal body. */
-  --font-size-xl: 1.25rem; /** Dense page headings when a heading size is too large. */
-  --font-size-heading-xs: 1.5rem; /** Default dashboard page title; card hero value. */
-  --font-size-heading-sm: 1.875rem; /** Section heading in docs/marketing. */
-  --font-size-heading-md: 2.25rem; /** Large section heading; rare in product UI. */
-  --font-size-heading-lg: 3rem; /** Marketing/editorial heading. */
-  --font-size-heading-xl: 3.75rem; /** Hero heading. */
-  --font-size-heading-2xl: 4.5rem; /** Largest display heading. */
-  --line-height-xs: 1.125rem;
-  --line-height-sm: 1.25rem;
-  --line-height-md: 1.5rem;
-  --line-height-lg: 1.75rem;
-  --line-height-xl: 1.875rem;
-  --line-height-heading-xs: 2rem;
-  --line-height-heading-sm: 2.375rem;
-  --line-height-heading-md: 2.75rem;
-  --line-height-heading-lg: 3.75rem;
-  --line-height-heading-xl: 4.5rem;
-  --line-height-heading-2xl: 5.625rem;
-  --font-weight-regular: 400; /** Body copy. */
-  --font-weight-medium: 500; /** Control text; table emphasis. */
-  --font-weight-semibold: 600; /** Headings, card labels, important values. */
-  --font-weight-bold: 700; /** Strong emphasis; use sparingly in product UI. */
-  --shadow-xs: 0 0.0625rem 0.125rem 0 rgba(10, 13, 18, 0.05); /** Subtle lift for resting cards/buttons. */
-  --shadow-sm: 0 0.0625rem 0.125rem 0 rgba(0, 0, 0, 0.05); /** Slightly raised controls. */
-  --shadow-md: 0 0.25rem 0.375rem -0.0625rem rgba(0, 0, 0, 0.1), 0 0.125rem 0.25rem -0.0625rem rgba(0, 0, 0, 0.06); /** Raised interactive surfaces. */
-  --shadow-lg: 0 0.625rem 0.9375rem -0.1875rem rgba(0, 0, 0, 0.1), 0 0.25rem 0.375rem -0.125rem rgba(0, 0, 0, 0.05); /** Menus, popovers, dropdowns. */
-  --shadow-xl: 0 1.25rem 1.5625rem -0.3125rem rgba(0, 0, 0, 0.1), 0 0.625rem 0.625rem -0.3125rem rgba(0, 0, 0, 0.04); /** Drawers and large overlays. */
-  --shadow-2xl: 0 1.5625rem 3.125rem -0.75rem rgba(0, 0, 0, 0.25); /** Modals and prominent overlays. */
-  --shadow-3xl: 0rem 2rem 4rem -0.75rem rgba(10, 13, 18, 0.14), 0rem 0.3125rem 0.3125rem -0.15625rem rgba(10, 13, 18, 0.04); /** Highest-elevation overlays. */
-  --shadow-inner: inset 0 0.125rem 0.25rem 0 rgba(0, 0, 0, 0.06); /** Inset/pressed treatment. */
-  --font-family-sans: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; /** Clean geometric sans. */
+
+  /* Spacing Scale */
+  --space-none: 0rem;
+  --space-xxs: 0.125rem;
+  --space-xs: 0.25rem;
+  --space-sm: 0.375rem;
+  --space-md: 0.5rem;
+  --space-md-lg: 0.625rem;
+  --space-lg: 0.75rem;
+  --space-lg-xl: 0.875rem;
+  --space-xl: 1rem;
+  --space-2xl: 1.25rem;
+  --space-3xl: 1.5rem;
+  --space-4xl: 2rem;
+  --space-5xl: 2.5rem;
+  --space-6xl: 3rem;
+  --space-7xl: 4rem;
+  --space-8xl: 5rem;
+  --space-9xl: 6rem;
+  --space-10xl: 8rem;
+  --space-11xl: 10rem;
+
+  /* Corner Radii */
+  --radius-none: 0rem;
+  --radius-xxs: 0.125rem;
+  --radius-xs: 0.25rem;
+  --radius-sm: 0.375rem;
+  --radius-md: 0.5rem;
+  --radius-lg: 0.625rem;
+  --radius-xl: 0.75rem;
+  --radius-2xl: 1rem;
+  --radius-3xl: 1.25rem;
+  --radius-4xl: 1.5rem;
+  --radius-full: 9999px;
+
+  /* Typography Scales — Matching revior.xyz hierarchy, line-heights, letter-spacing */
+  --font-family-sans: "Google Sans Flex", "Google Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --font-family-mono: "Google Sans Code", "JetBrains Mono", ui-monospace, Menlo, monospace;
+
+  --font-size-xs: 0.75rem; /* 12px captions & dense metadata */
+  --font-size-sm: 0.84375rem; /* 13.5px controls & subtext */
+  --font-size-md: 0.9375rem; /* 15px default body */
+  --font-size-lg: 1.0625rem; /* 17px roomy descriptions */
+  --font-size-xl: 1.1875rem; /* 19px card titles & subheads */
+  --font-size-heading-xs: 1.375rem; /* 22px / h3 */
+  --font-size-heading-sm: 1.625rem; /* 26px / h2 */
+  --font-size-heading-md: 2rem; /* 32px display heading */
+  --font-size-heading-lg: 2.5rem; /* 40px section hero */
+  --font-size-heading-xl: 3rem; /* 48px / h1 */
+  --font-size-heading-2xl: 3.75rem; /* 60px display */
+
+  --line-height-xs: 1.4;
+  --line-height-sm: 1.45;
+  --line-height-md: 1.6; /* 25.6px — generous, calm line height */
+  --line-height-lg: 1.5;
+  --line-height-xl: 1.4;
+  --line-height-heading-xs: 1.25;
+  --line-height-heading-sm: 1.2;
+  --line-height-heading-md: 1.15;
+  --line-height-heading-lg: 1.12;
+  --line-height-heading-xl: 1.1;
+  --line-height-heading-2xl: 1.08;
+
+  --letter-spacing-heading-h1: -0.035em;
+  --letter-spacing-heading-h2: -0.03em;
+  --letter-spacing-heading-h3: -0.02em;
+  --letter-spacing-tight: -0.02em;
+  --letter-spacing-normal: 0em;
+  --letter-spacing-wide: 0.025em;
+
+  --font-weight-regular: 400;
+  --font-weight-medium: 500;
+  --font-weight-semibold: 600;
+  --font-weight-bold: 700;
+
+  /* Shadows — Subtle, clean, calm elevation */
+  --shadow-xs: 0 1px 2px 0 rgba(12, 25, 56, 0.04);
+  --shadow-sm: 0 1px 3px 0 rgba(12, 25, 56, 0.06), 0 1px 2px 0 rgba(12, 25, 56, 0.04);
+  --shadow-md: 0 4px 6px -1px rgba(12, 25, 56, 0.08), 0 2px 4px -1px rgba(12, 25, 56, 0.04);
+  --shadow-lg: 0 10px 15px -3px rgba(12, 25, 56, 0.08), 0 4px 6px -2px rgba(12, 25, 56, 0.04);
+  --shadow-xl: 0 20px 25px -5px rgba(12, 25, 56, 0.08), 0 10px 10px -5px rgba(12, 25, 56, 0.03);
+  --shadow-2xl: 0 25px 50px -12px rgba(12, 25, 56, 0.18);
+  --shadow-3xl: 0 32px 64px -12px rgba(12, 25, 56, 0.2);
+  --shadow-inner: inset 0 2px 4px 0 rgba(12, 25, 56, 0.05);
 }
 
 [data-theme="dark"], .dark {
-  --color-text-primary: #f7f7f7; /** Titles, key values, primary reading text. */
-  --color-text-secondary: #cecfd2; /** Body copy, labels, secondary headings. */
-  --color-text-tertiary: #94979c; /** Helper copy, metadata, descriptions. */
-  --color-text-quaternary: #94979c; /** Lowest-emphasis text. */
-  --color-text-primary-on-brand: #f7f7f7; /** Text and labels on solid brand fills. */
-  --color-text-placeholder: #85888e; /** Input placeholder text. */
-  --color-text-disabled: #85888e; /** Text in disabled controls. */
-  --color-text-brand-primary: #f7f7f7; /** Links, selected text, brand emphasis. */
-  --color-text-error-primary: #f97066; /** Error text and destructive emphasis. */
-  --color-text-warning-primary: #fdb022; /** Warning text. */
-  --color-text-success-primary: #47cd89; /** Success text. */
-  --color-fg-primary: #ffffff; /** Strongest icon color. */
-  --color-fg-secondary: #cecfd2; /** Icons paired with secondary text. */
-  --color-fg-tertiary: #94979c; /** Supporting icons. */
-  --color-fg-quaternary: #94979c; /** Default utility-icon color. */
-  --color-fg-quaternary-hover: #cecfd2; /** Utility icon on hover. */
-  --color-fg-brand-primary: #4f37fd; /** Brand-emphasised icons. */
-  --color-fg-error-primary: #f04438; /** Error status icons. */
-  --color-fg-warning-primary: #f79009; /** Warning status icons. */
-  --color-fg-success-primary: #17b26a; /** Success status icons. */
-  --color-fg-disabled: #85888e; /** Icons in disabled controls. */
-  --color-fg-white: #ffffff; /** Icons on solid brand/status fills. */
-  --color-bg-primary: #0c0e12; /** Page/canvas and default card surface. */
-  --color-bg-primary-hover: #212124; /** Hovered canvas/control surface. */
-  --color-bg-primary-solid: #13161b; /** Inverted solid surface — tooltips, dark chips. */
-  --color-bg-secondary: #13161b; /** Grouped/quiet regions; table headers. */
-  --color-bg-secondary-hover: #212124; /** Hovered grouped surface; table row hover. */
-  --color-bg-tertiary: #212124; /** Nested/subtle raised surfaces. */
-  --color-bg-overlay: #212124; /** Modal/drawer backdrop scrim (pair with opacity). */
-  --color-bg-brand-solid: #4832e7; /** Primary action fill; brand-owned solid surface. */
-  --color-bg-brand-solid-hover: #4f37fd; /** Primary action hover fill. */
-  --color-bg-error-primary: #f04438; /** Pale error tint in light, solid in dark — pair per theme. */
-  --color-bg-warning-primary: #f79009; /** Pale warning tint in light, solid in dark — pair per theme. */
-  --color-bg-success-primary: #17b26a; /** Pale success tint in light, solid in dark — pair per theme. */
-  --color-bg-error-secondary: #d92d20; /** Error tint in light, solid in dark — pair per theme. */
-  --color-bg-warning-secondary: #dc6803; /** Warning tint in light, solid in dark — pair per theme. */
-  --color-bg-success-secondary: #079455; /** Success tint in light, solid in dark — pair per theme. */
-  --color-bg-disabled-subtle: #13161b; /** Disabled control surface. */
-  --color-border-primary: #373a41; /** Inputs, cards, strong dividers. */
-  --color-border-secondary: #212124; /** Row dividers, soft separators. */
-  --color-border-brand: #7e73fd; /** Brand-emphasised or selected outlines. */
-  --color-border-error-subtle: #f97066; /** Error outline on invalid inputs and callouts. */
-  --color-ring-focus-ring: #4f37fd; /** Keyboard focus ring. */
-  --color-ring-focus-ring-error: #f04438; /** Focus ring on invalid controls. */
-  --color-utility-gray-50: #13161b; /** Theme-aware gray tinted surface (badges, alerts). */
-  --color-utility-gray-200: #373a41; /** Theme-aware gray tinted border (badges). */
-  --color-utility-gray-600: #94979c; /** Theme-aware gray accent text on the 50 tint (alerts). */
-  --color-utility-gray-700: #cecfd2; /** Theme-aware gray accent text on the 50 tint (badges). */
-  --color-utility-brand-50: #201667; /** Theme-aware brand tinted surface (badges, alerts). */
-  --color-utility-brand-200: #3827b3; /** Theme-aware brand tinted border (badges). */
-  --color-utility-brand-600: #7e73fd; /** Theme-aware brand accent text on the 50 tint (alerts). */
-  --color-utility-brand-700: #a19afe; /** Theme-aware brand accent text on the 50 tint (badges). */
-  --color-utility-success-50: #053321; /** Theme-aware success tinted surface (badges, alerts). */
-  --color-utility-success-200: #085d3a; /** Theme-aware success tinted border (badges). */
-  --color-utility-success-600: #47cd89; /** Theme-aware success accent text on the 50 tint (alerts). */
-  --color-utility-success-700: #75e0a7; /** Theme-aware success accent text on the 50 tint (badges). */
-  --color-utility-warning-50: #4e1d09; /** Theme-aware warning tinted surface (badges, alerts). */
-  --color-utility-warning-200: #93370d; /** Theme-aware warning tinted border (badges). */
-  --color-utility-warning-600: #fdb022; /** Theme-aware warning accent text on the 50 tint (alerts). */
-  --color-utility-warning-700: #fec84b; /** Theme-aware warning accent text on the 50 tint (badges). */
-  --color-utility-error-50: #55160c; /** Theme-aware error tinted surface (badges, alerts). */
-  --color-utility-error-200: #912018; /** Theme-aware error tinted border (badges). */
-  --color-utility-error-600: #f97066; /** Theme-aware error accent text on the 50 tint (alerts). */
-  --color-utility-error-700: #fda29b; /** Theme-aware error accent text on the 50 tint (badges). */
+  --color-text-primary: #f0f5fc;
+  --color-text-secondary: #94a9c9;
+  --color-text-tertiary: #687e9e;
+  --color-text-quaternary: #4a5d78;
+  --color-text-primary-on-brand: #ffffff;
+  --color-text-placeholder: #5b708e;
+  --color-text-disabled: #4a5d78;
+  --color-text-brand-primary: #60a5fa;
+  --color-text-brand-hover: #93c5fd;
+
+  --color-text-error-primary: #f87171;
+  --color-text-warning-primary: #fbbf24;
+  --color-text-success-primary: #34d399;
+
+  --color-fg-primary: #f0f5fc;
+  --color-fg-secondary: #94a9c9;
+  --color-fg-tertiary: #687e9e;
+  --color-fg-quaternary: #4a5d78;
+  --color-fg-quaternary-hover: #94a9c9;
+  --color-fg-brand-primary: #60a5fa;
+  --color-fg-error-primary: #f87171;
+  --color-fg-warning-primary: #fbbf24;
+  --color-fg-success-primary: #34d399;
+  --color-fg-disabled: #334155;
+  --color-fg-white: #ffffff;
+
+  --color-bg-primary: #0a1120;
+  --color-bg-primary-hover: #121d33;
+  --color-bg-primary-solid: #0c1938;
+  --color-bg-secondary: #060b16;
+  --color-bg-secondary-hover: #101a2e;
+  --color-bg-tertiary: #14223d;
+  --color-bg-overlay: #060b16;
+  --color-bg-brand-solid: #0067f5;
+  --color-bg-brand-solid-hover: #1d4ed8;
+  --color-bg-brand-subtle: #112240;
+  --color-bg-disabled-subtle: #0e172a;
+
+  --color-bg-error-primary: #2d1014;
+  --color-bg-warning-primary: #2d1f08;
+  --color-bg-success-primary: #08291a;
+  --color-bg-error-secondary: #45131b;
+  --color-bg-warning-secondary: #472b0c;
+  --color-bg-success-secondary: #0c3e27;
+
+  --color-border-primary: #192744;
+  --color-border-secondary: #131e36;
+  --color-border-brand: #3b82f6;
+  --color-border-brand-subtle: #1e3a8a;
+  --color-border-error-subtle: #7f1d1d;
+  --color-border-warning-subtle: #78350f;
+  --color-border-success-subtle: #064e3b;
+
+  --color-ring-focus-ring: #60a5fa;
+  --color-ring-focus-ring-error: #f87171;
+
+  --color-utility-gray-50: #0a1120;
+  --color-utility-gray-200: #192744;
+  --color-utility-gray-600: #94a9c9;
+  --color-utility-gray-700: #f0f5fc;
+
+  --color-utility-brand-50: #0e1e3c;
+  --color-utility-brand-100: #132b56;
+  --color-utility-brand-200: #1e3a8a;
+  --color-utility-brand-600: #60a5fa;
+  --color-utility-brand-700: #93c5fd;
+
+  --color-utility-success-50: #08291a;
+  --color-utility-success-200: #064e3b;
+  --color-utility-success-600: #34d399;
+  --color-utility-success-700: #6ee7b7;
+
+  --color-utility-warning-50: #2d1f08;
+  --color-utility-warning-200: #78350f;
+  --color-utility-warning-600: #fbbf24;
+  --color-utility-warning-700: #fde68a;
+
+  --color-utility-error-50: #2d1014;
+  --color-utility-error-200: #7f1d1d;
+  --color-utility-error-600: #f87171;
+  --color-utility-error-700: #fca5a5;
 }

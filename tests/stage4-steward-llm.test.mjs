@@ -273,3 +273,90 @@ test('extractJsonObject parses raw JSON and fenced markdown JSON', () => {
   const parsed = extractJsonObject('```json\n{"reply":"hello"}\n```')
   assert.equal(parsed.reply, 'hello')
 })
+
+test('Steward LLM: runPayoutRecommendation strictly excludes members who already claimed in prior cycles', async () => {
+  const serverMembers = [
+    { id: 'm1', name: 'Israel', address: '0x0001', avatarColor: '' },
+    { id: 'm2', name: 'Daniel', address: '0x0002', avatarColor: '' },
+    { id: 'm3', name: 'Sarah', address: '0x0003', avatarColor: '' },
+  ]
+
+  // Simulate LLM attempting to recommend m1 again for cycle 2 despite m1 having claimed cycle 1
+  const fakeFetchRecommendsOldMember = async () => ({
+    ok: true,
+    status: 200,
+    async json() {
+      return {
+        choices: [
+          {
+            message: {
+              content: JSON.stringify({
+                nextRecipientId: 'm1', // Ineligible: m1 already claimed cycle 1!
+                rationale: 'Recommending Israel again.',
+                memberRisks: [
+                  { memberId: 'm1', riskLevel: 'Zero Risk', reasoning: 'Paid', action: 'None' },
+                  { memberId: 'm2', riskLevel: 'Zero Risk', reasoning: 'Paid', action: 'None' },
+                  { memberId: 'm3', riskLevel: 'Zero Risk', reasoning: 'Paid', action: 'None' },
+                ],
+              }),
+            },
+          },
+        ],
+      }
+    },
+  })
+
+  // Test Cycle 2: m1 claimed cycle 1. Next recipient MUST be m2 (Daniel), NOT m1 (Israel).
+  const recCycle2 = await runPayoutRecommendation(
+    {
+      circleId: 'test-circle-rot',
+      cycle: 2,
+      withMemory: false,
+      claimedMemberIds: ['m1'],
+    },
+    {
+      env: LLM_ENV,
+      fetchFn: fakeFetchRecommendsOldMember,
+      serverMembers,
+    }
+  )
+
+  assert.equal(recCycle2.nextRecipient.id, 'm2', 'Must strictly override ineligible already-claimed member to Daniel (m2)')
+  assert.deepEqual(recCycle2.claimedMemberIds, ['m1'])
+  assert.deepEqual(recCycle2.eligibleMemberIds, ['m2', 'm3'])
+
+  // Test Cycle 3: m1 and m2 claimed. Next recipient MUST be m3 (Sarah).
+  const recCycle3 = await runPayoutRecommendation(
+    {
+      circleId: 'test-circle-rot',
+      cycle: 3,
+      withMemory: false,
+      claimedMemberIds: ['m1', 'm2'],
+    },
+    {
+      env: LLM_ENV,
+      fetchFn: fakeFetchRecommendsOldMember,
+      serverMembers,
+    }
+  )
+
+  assert.equal(recCycle3.nextRecipient.id, 'm3', 'Must advance to next eligible member Sarah (m3)')
+
+  // Test All Claimed: m1, m2, m3 all claimed. Must mark isCompleted: true and nextRecipient: null.
+  const recAllClaimed = await runPayoutRecommendation(
+    {
+      circleId: 'test-circle-rot',
+      cycle: 3,
+      withMemory: false,
+      claimedMemberIds: ['m1', 'm2', 'm3'],
+    },
+    {
+      env: LLM_ENV,
+      fetchFn: fakeFetchRecommendsOldMember,
+      serverMembers,
+    }
+  )
+
+  assert.equal(recAllClaimed.isCompleted, true)
+  assert.equal(recAllClaimed.nextRecipient, null)
+})

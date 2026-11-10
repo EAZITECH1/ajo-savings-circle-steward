@@ -4,7 +4,9 @@ import {
   classifyChainContribution,
   evaluateContributionPolicy,
   normalizeSuiAddress,
+  normalizeCoinType,
 } from './payment-policy.mjs'
+import { getSupportedTokens } from './tokens.mjs'
 
 export class TransactionConflictError extends Error {
   constructor(message, statusCode = 409) {
@@ -301,6 +303,35 @@ export function listSubmittedTransactionsForCircle(circleId) {
   return items
 }
 
+function makeTokenDecimalsResolver(network, fallbackCoinType, fallbackDecimals) {
+  const decimalsByCoinType = new Map()
+  for (const token of Object.values(getSupportedTokens(network))) {
+    if (token.coinType && Number.isInteger(token.decimals)) {
+      decimalsByCoinType.set(normalizeCoinType(token.coinType), token.decimals)
+    }
+  }
+  if (fallbackCoinType && Number.isInteger(fallbackDecimals)) {
+    decimalsByCoinType.set(normalizeCoinType(fallbackCoinType), fallbackDecimals)
+  }
+
+  return (coinType) => decimalsByCoinType.get(normalizeCoinType(coinType))
+}
+
+function resolveDecimals(tokenDecimals, coinType) {
+  const decimals = typeof tokenDecimals === 'function'
+    ? tokenDecimals(coinType)
+    : tokenDecimals
+  return Number.isInteger(decimals) && decimals >= 0 && decimals <= 18 ? decimals : null
+}
+
+function unknownPoolTokenDecimals(txDigest, coinType) {
+  return {
+    lookupStatus: 'incomplete_fields',
+    lookupError: `Cannot safely verify transaction "${txDigest}": decimals are not configured for token ${coinType}.`,
+    transfers: [],
+  }
+}
+
 /**
  * Parse a `sui_getTransactionBlock` result payload into verified transfer observations.
  * Verifies that `transaction.data.sender`, `effects.status.status`, `balanceChanges`,
@@ -309,7 +340,7 @@ export function listSubmittedTransactionsForCircle(circleId) {
  * @param {string} txDigest
  * @param {any} rpcResult
  * @param {string} expectedPoolAddress
- * @param {number} tokenDecimals
+ * @param {number | ((coinType: string) => number | undefined)} tokenDecimals
  */
 export function parseSuiTransactionBlock(txDigest, rpcResult, expectedPoolAddress, tokenDecimals = 6) {
   if (!rpcResult || typeof rpcResult !== 'object') {
@@ -361,30 +392,90 @@ export function parseSuiTransactionBlock(txDigest, rpcResult, expectedPoolAddres
     }
   }
 
-  const divisor = Math.pow(10, Number.isInteger(tokenDecimals) ? tokenDecimals : 6)
   const positiveChanges = []
 
-  for (const bc of balanceChanges) {
-    const recipient = bc?.owner?.AddressOwner || bc?.owner?.ObjectOwner || ''
-    const coinType = bc?.coinType || ''
-    const rawAmtStr = String(bc?.amount ?? '0')
-    let rawAmtBig
-    try {
-      rawAmtBig = BigInt(rawAmtStr)
-    } catch {
-      continue
+  // 1. Move Contract Event Verification (Circle<T> shared object vault deposits)
+  const events = rpcResult?.events || []
+  for (const ev of events) {
+    const typeStr = ev?.type || ''
+    if (typeStr.includes('::circle::ContributionEvent')) {
+      const eventJson = ev?.parsedJson || {}
+      const circleId = eventJson.circle_id || ''
+      if (!expectedPoolAddress || normalizeSuiAddress(circleId) === normalizeSuiAddress(expectedPoolAddress)) {
+        const member = eventJson.member || sender
+        const amountPaidStr = String(eventJson.amount_paid ?? '0')
+        let rawAmtBig = 0n
+        try { rawAmtBig = BigInt(amountPaidStr) } catch {}
+        let matchedCoinType = ''
+        if (Array.isArray(balanceChanges)) {
+          const negCoin = balanceChanges.find((bc) => {
+            const ct = bc?.coinType || ''
+            const amt = BigInt(String(bc?.amount ?? '0'))
+            return amt < 0n && !ct.endsWith('::sui::SUI')
+          })
+          if (negCoin) matchedCoinType = negCoin.coinType || ''
+          else {
+            const suiNeg = balanceChanges.find((bc) => {
+              const ct = bc?.coinType || ''
+              const amt = BigInt(String(bc?.amount ?? '0'))
+              return amt < 0n && ct.endsWith('::sui::SUI')
+            })
+            if (suiNeg) matchedCoinType = suiNeg.coinType || '0x2::sui::SUI'
+          }
+        }
+        if (rawAmtBig > 0n) {
+          const decimals = resolveDecimals(tokenDecimals, matchedCoinType) ?? 6
+          const divisor = Math.pow(10, decimals)
+          const humanAmount = Number(rawAmtBig) / divisor
+          positiveChanges.push({
+            txDigest,
+            sender: member,
+            recipient: expectedPoolAddress || circleId,
+            tokenType: matchedCoinType,
+            amount: humanAmount,
+            timestampMs,
+            executionSuccess: true,
+          })
+        }
+      }
     }
-    if (rawAmtBig > 0n && recipient && coinType) {
-      const humanAmount = Number(rawAmtBig) / divisor
-      positiveChanges.push({
-        txDigest,
-        sender,
-        recipient,
-        tokenType: coinType,
-        amount: humanAmount,
-        timestampMs,
-        executionSuccess: true,
-      })
+  }
+
+  // 2. Direct Coin Balance Changes Verification (Fallback for direct peer-to-peer / wallet transfers)
+  if (positiveChanges.length === 0) {
+    for (const bc of balanceChanges) {
+      const recipient = bc?.owner?.AddressOwner || bc?.owner?.ObjectOwner || ''
+      const coinType = bc?.coinType || ''
+      const rawAmtStr = String(bc?.amount ?? '0')
+      let rawAmtBig
+      try {
+        rawAmtBig = BigInt(rawAmtStr)
+      } catch {
+        continue
+      }
+      if (rawAmtBig > 0n && recipient && coinType) {
+        if (expectedPoolAddress && normalizeSuiAddress(recipient) !== normalizeSuiAddress(expectedPoolAddress)) {
+          continue
+        }
+        const decimals = resolveDecimals(tokenDecimals, coinType)
+        if (decimals === null) {
+          if (normalizeSuiAddress(recipient) === normalizeSuiAddress(expectedPoolAddress)) {
+            return unknownPoolTokenDecimals(txDigest, coinType)
+          }
+          continue
+        }
+        const divisor = Math.pow(10, decimals)
+        const humanAmount = Number(rawAmtBig) / divisor
+        positiveChanges.push({
+          txDigest,
+          sender,
+          recipient,
+          tokenType: coinType,
+          amount: humanAmount,
+          timestampMs,
+          executionSuccess: true,
+        })
+      }
     }
   }
 
@@ -419,7 +510,7 @@ export function parseSuiTransactionBlock(txDigest, rpcResult, expectedPoolAddres
  * @param {string} txDigest
  * @param {any} gqlTx
  * @param {string} expectedPoolAddress
- * @param {number} tokenDecimals
+ * @param {number | ((coinType: string) => number | undefined)} tokenDecimals
  */
 export function parseSuiGraphqlTransaction(txDigest, gqlTx, expectedPoolAddress, tokenDecimals = 6) {
   if (!gqlTx || typeof gqlTx !== 'object') {
@@ -472,30 +563,96 @@ export function parseSuiGraphqlTransaction(txDigest, gqlTx, expectedPoolAddress,
     }
   }
 
-  const divisor = Math.pow(10, Number.isInteger(tokenDecimals) ? tokenDecimals : 6)
   const positiveChanges = []
 
-  for (const bc of balanceChangesNodes) {
-    const recipient = bc?.owner?.address || ''
-    const coinType = bc?.coinType?.repr || ''
-    const rawAmtStr = String(bc?.amount ?? '0')
-    let rawAmtBig
-    try {
-      rawAmtBig = BigInt(rawAmtStr)
-    } catch {
-      continue
+  // 1. Move Contract Event Verification (Circle<T> shared object vault deposits)
+  const events = gqlTx?.effects?.events?.nodes || []
+  for (const ev of events) {
+    const typeRepr = ev?.contents?.type?.repr || ''
+    if (typeRepr.includes('::circle::ContributionEvent')) {
+      const eventJson = ev?.contents?.json || {}
+      const circleId = eventJson.circle_id || ''
+      if (!expectedPoolAddress || normalizeSuiAddress(circleId) === normalizeSuiAddress(expectedPoolAddress)) {
+        const member = eventJson.member || sender
+        const amountPaidStr = String(eventJson.amount_paid ?? '0')
+        let rawAmtBig = 0n
+        try {
+          rawAmtBig = BigInt(amountPaidStr)
+        } catch {}
+
+        // Find tokenType from negative balanceChange of the member, or fallback to circle config/tokens
+        let matchedCoinType = ''
+        if (Array.isArray(balanceChangesNodes)) {
+          const negCoin = balanceChangesNodes.find((bc) => {
+            const ct = bc?.coinType?.repr || ''
+            const amt = BigInt(String(bc?.amount ?? '0'))
+            return amt < 0n && !ct.endsWith('::sui::SUI')
+          })
+          if (negCoin) {
+            matchedCoinType = negCoin.coinType?.repr || ''
+          } else {
+            const suiNeg = balanceChangesNodes.find((bc) => {
+              const ct = bc?.coinType?.repr || ''
+              const amt = BigInt(String(bc?.amount ?? '0'))
+              return amt < 0n && ct.endsWith('::sui::SUI')
+            })
+            if (suiNeg) matchedCoinType = suiNeg.coinType?.repr || '0x2::sui::SUI'
+          }
+        }
+
+        if (rawAmtBig > 0n) {
+          const decimals = resolveDecimals(tokenDecimals, matchedCoinType) ?? 6
+          const divisor = Math.pow(10, decimals)
+          const humanAmount = Number(rawAmtBig) / divisor
+          positiveChanges.push({
+            txDigest,
+            sender: member,
+            recipient: expectedPoolAddress || circleId,
+            tokenType: matchedCoinType,
+            amount: humanAmount,
+            timestampMs,
+            executionSuccess: true,
+          })
+        }
+      }
     }
-    if (rawAmtBig > 0n && recipient && coinType) {
-      const humanAmount = Number(rawAmtBig) / divisor
-      positiveChanges.push({
-        txDigest,
-        sender,
-        recipient,
-        tokenType: coinType,
-        amount: humanAmount,
-        timestampMs,
-        executionSuccess: true,
-      })
+  }
+
+  // 2. Direct Coin Balance Changes Verification (Fallback for direct peer-to-peer / wallet transfers)
+  if (positiveChanges.length === 0) {
+    for (const bc of balanceChangesNodes) {
+      const recipient = bc?.owner?.address || ''
+      const coinType = bc?.coinType?.repr || ''
+      const rawAmtStr = String(bc?.amount ?? '0')
+      let rawAmtBig
+      try {
+        rawAmtBig = BigInt(rawAmtStr)
+      } catch {
+        continue
+      }
+      if (rawAmtBig > 0n && recipient && coinType) {
+        if (expectedPoolAddress && normalizeSuiAddress(recipient) !== normalizeSuiAddress(expectedPoolAddress)) {
+          continue
+        }
+        const decimals = resolveDecimals(tokenDecimals, coinType)
+        if (decimals === null) {
+          if (normalizeSuiAddress(recipient) === normalizeSuiAddress(expectedPoolAddress)) {
+            return unknownPoolTokenDecimals(txDigest, coinType)
+          }
+          continue
+        }
+        const divisor = Math.pow(10, decimals)
+        const humanAmount = Number(rawAmtBig) / divisor
+        positiveChanges.push({
+          txDigest,
+          sender,
+          recipient,
+          tokenType: coinType,
+          amount: humanAmount,
+          timestampMs,
+          executionSuccess: true,
+        })
+      }
     }
   }
 
@@ -543,10 +700,169 @@ const SUI_GRAPHQL_TX_QUERY = `
             amount
           }
         }
+        events {
+          nodes {
+            contents {
+              type {
+                repr
+              }
+              json
+            }
+          }
+        }
       }
     }
   }
 `
+
+const SUI_GRAPHQL_RECENT_CONTRIBUTIONS_QUERY = `
+  query FindRecentContributions($pool: SuiAddress!, $sender: SuiAddress!) {
+    transactions(last: 50, filter: { affectedAddress: $pool, sentAddress: $sender }) {
+      nodes {
+        digest
+        sender { address }
+        effects {
+          status
+          timestamp
+          balanceChanges {
+            nodes {
+              owner { address }
+              coinType { repr }
+              amount
+            }
+          }
+          events {
+            nodes {
+              contents {
+                type { repr }
+                json
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+`
+
+/**
+ * Discover recent successful transfers from a member into a circle pool.
+ * This recovers payments when the wallet execution succeeded but the client
+ * did not retain the returned digest. Only transactions matching the exact
+ * sender, recipient, token, and cycle start are returned.
+ */
+export async function discoverRecentContributionDigests(params, options = {}) {
+  const env = options.env || process.env
+  const cfg = loadConfig(env)
+  if (!cfg.integrations.tatum.configured || !cfg.integrations.tatum.config) {
+    throw new Error(`Tatum Sui integration is not configured (${cfg.integrations.tatum.issues.join('; ')}).`)
+  }
+
+  const {
+    poolAddress,
+    memberAddress,
+    token,
+    windowStart,
+    windowEnd,
+    cycle = 1,
+    circleId,
+    createdAt,
+    expectedAmount,
+    decimals,
+  } = params
+  const windowStartMs = typeof windowStart === 'number' ? windowStart : Date.parse(windowStart)
+  const windowEndMs = typeof windowEnd === 'number' ? windowEnd : (windowEnd ? Date.parse(windowEnd) : NaN)
+  const createdAtMs = createdAt ? (typeof createdAt === 'number' ? createdAt : Date.parse(createdAt)) : NaN
+  const effectiveStartMs = Number.isFinite(createdAtMs) && Number.isFinite(windowStartMs)
+    ? Math.max(createdAtMs, windowStartMs)
+    : Number.isFinite(createdAtMs)
+    ? createdAtMs
+    : windowStartMs
+  const clockSkewBufferMs = 60 * 1000
+  const minValidTimestampMs = effectiveStartMs - clockSkewBufferMs
+  if (!poolAddress || !memberAddress || !token || !Number.isFinite(windowStartMs)) {
+    throw new Error('Pool, member, token, and a valid cycle start are required to discover contributions.')
+  }
+
+  const serviceConfig = cfg.integrations.tatum.config
+  const tunables = cfg.tunables
+  const network = serviceConfig.SUI_NETWORK
+  const result = await rpcQueue.enqueue(
+    async () => {
+      const response = await tatumGraphql(
+        'sui',
+        SUI_GRAPHQL_RECENT_CONTRIBUTIONS_QUERY,
+        { pool: poolAddress, sender: memberAddress },
+        network,
+        env
+      )
+      if ([429, 502, 503, 504].includes(response.status)) {
+        const retryErr = new Error(`Tatum Sui GraphQL HTTP ${response.status}`)
+        retryErr.retryable = true
+        throw retryErr
+      }
+      if (!response.ok) throw new Error(`Tatum Sui GraphQL returned HTTP ${response.status}`)
+      return response.json()
+    },
+    {
+      rateLimitRps: tunables.rateLimitRps,
+      rateLimitMaxRetries: tunables.rateLimitMaxRetries,
+      rateLimitBackoffMs: tunables.rateLimitBackoffMs,
+    }
+  )
+
+  if (Array.isArray(result?.errors) && result.errors.length > 0) {
+    throw new Error(`Tatum Sui GraphQL error: ${result.errors.map((error) => error.message).join('; ')}`)
+  }
+
+  const expectedSender = normalizeSuiAddress(memberAddress)
+  const expectedPool = normalizeSuiAddress(poolAddress)
+  const expectedToken = normalizeCoinType(token)
+
+  const matches = (result?.data?.transactions?.nodes || []).filter((transaction) => {
+    const effects = transaction?.effects
+    const timestampMs = Date.parse(effects?.timestamp || '')
+    if (
+      !transaction?.digest ||
+      String(effects?.status || '').toUpperCase() !== 'SUCCESS' ||
+      normalizeSuiAddress(transaction?.sender?.address || '') !== expectedSender ||
+      !Number.isFinite(timestampMs) ||
+      timestampMs < minValidTimestampMs ||
+      (Number.isFinite(windowEndMs) && timestampMs > windowEndMs)
+    ) {
+      return false
+    }
+
+    // Check if digest was already claimed by a different circle in server memory
+    if (circleId) {
+      const txKey = makeTxNetworkKey(transaction.digest, network)
+      const existing = submittedTransactionsStore.get(txKey)
+      if (existing && existing.circleId !== String(circleId).trim()) {
+        return false // Belongs to a different circle
+      }
+    }
+
+    // Check for on-chain Move ContributionEvent
+    const hasMatchingEvent = (effects?.events?.nodes || []).some((ev) => {
+      const typeRepr = ev?.contents?.type?.repr || ''
+      if (!typeRepr.includes('::circle::ContributionEvent')) return false
+      const json = ev?.contents?.json || {}
+      return normalizeSuiAddress(json.circle_id || '') === expectedPool &&
+        normalizeSuiAddress(json.member || '') === expectedSender
+    })
+    if (hasMatchingEvent) return true
+
+    return (effects?.balanceChanges?.nodes || []).some((change) => {
+      let amount = 0n
+      try { amount = BigInt(String(change?.amount ?? '0')) } catch {}
+      return amount > 0n &&
+        normalizeSuiAddress(change?.owner?.address || '') === expectedPool &&
+        normalizeCoinType(change?.coinType?.repr || '') === expectedToken
+    })
+  })
+
+  return [...new Set(matches.map((transaction) => transaction.digest))]
+}
 
 /**
  * Look up a single Sui transaction digest via Tatum's Sui Gateway (GraphQL `/graphql` or JSON-RPC `sui_getTransactionBlock`).
@@ -581,7 +897,11 @@ export async function lookupSuiTransactionViaTatum(txDigest, expectedPoolAddress
   const tatumCfg = cfg.integrations.tatum.config
   const tunables = cfg.tunables
   const network = tatumCfg.SUI_NETWORK
-  const decimals = tatumCfg.SUI_TOKEN_DECIMALS
+  const decimalsForCoinType = makeTokenDecimalsResolver(
+    network,
+    tatumCfg.SUI_TOKEN_TYPE,
+    tatumCfg.SUI_TOKEN_DECIMALS
+  )
 
   try {
     if (!hasCustomRpc) {
@@ -628,7 +948,12 @@ export async function lookupSuiTransactionViaTatum(txDigest, expectedPoolAddress
         }
       }
 
-      return parseSuiGraphqlTransaction(txDigest.trim(), gqlPayload?.data?.transaction, expectedPoolAddress, decimals)
+      return parseSuiGraphqlTransaction(
+        txDigest.trim(),
+        gqlPayload?.data?.transaction,
+        expectedPoolAddress,
+        decimalsForCoinType
+      )
     }
 
     const rpcPayload = await rpcQueue.enqueue(
@@ -685,7 +1010,12 @@ export async function lookupSuiTransactionViaTatum(txDigest, expectedPoolAddress
       }
     }
 
-    return parseSuiTransactionBlock(txDigest.trim(), rpcPayload?.result, expectedPoolAddress, decimals)
+    return parseSuiTransactionBlock(
+      txDigest.trim(),
+      rpcPayload?.result,
+      expectedPoolAddress,
+      decimalsForCoinType
+    )
   } catch (err) {
     if (err instanceof MissingApiKeyError) {
       return {
@@ -934,6 +1264,7 @@ export async function verifyMemberContributionOnSui(params, options = {}) {
       expectedAmount: Number(expectedAmount),
       windowStart,
       windowEnd,
+      createdAt: params.createdAt,
     },
     partialPaymentWindowHours: tunables.partialPaymentWindowHours,
   })
@@ -994,6 +1325,30 @@ export async function checkTatumSuiStatus(options = {}) {
       )
 
       if (!res.ok) {
+        // Try JSON-RPC fallback if GraphQL returns an error
+        try {
+          const fbRes = await rpcCaller(
+            'sui',
+            { jsonrpc: '2.0', id: 1, method: 'sui_getChainIdentifier', params: [] },
+            network,
+            env
+          )
+          if (fbRes.ok) {
+            const fbData = await fbRes.json()
+            if (fbData?.result) {
+              return {
+                connected: true,
+                configured: true,
+                chain: 'sui',
+                network: `sui-${network}`,
+                chainId: fbData.result,
+              }
+            }
+          }
+        } catch {
+          // fallback failed, return GraphQL error
+        }
+
         return {
           connected: false,
           configured: true,

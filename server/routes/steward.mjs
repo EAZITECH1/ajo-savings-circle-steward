@@ -3,6 +3,7 @@ import {
   getStewardStatus,
   runStewardChat,
   runPayoutRecommendation,
+  runGroupReport,
 } from '../steward-llm.mjs'
 import { verifyCircleMembership } from '../walrus-memory.mjs'
 import { requireWalletSession, WalletAuthError } from '../wallet-auth.mjs'
@@ -69,6 +70,7 @@ router.post('/payout-recommendation', async (req, res) => {
     const output = await runPayoutRecommendation({
       circleId: body.circleId,
       cycle: body.cycle,
+      claimedMemberIds: body.claimedMemberIds,
       withMemory: body.withMemory,
       windowStart: body.windowStart,
       windowEnd: body.windowEnd,
@@ -79,6 +81,34 @@ router.post('/payout-recommendation', async (req, res) => {
     res.status(status).json({
       available: err.name !== 'ConfigValidationError',
       error: err.message || 'Steward payout recommendation failed',
+    })
+  }
+})
+
+router.post('/group-report', async (req, res) => {
+  try {
+    const session = requireWalletSession(req)
+    const body = req.body || {}
+    if (!body.circleId) {
+      return res.status(400).json({
+        available: true,
+        error: 'circleId is required for Group Report. Activate or select a circle first.',
+      })
+    }
+    verifyCircleMembership(body.circleId, { memberAddress: session.walletAddress })
+
+    const output = await runGroupReport({
+      circleId: body.circleId,
+      withMemory: body.withMemory !== false,
+      windowStart: body.windowStart,
+      windowEnd: body.windowEnd,
+    })
+    res.json(output)
+  } catch (err) {
+    const status = mapStewardErrorStatus(err)
+    res.status(status).json({
+      available: err.name !== 'ConfigValidationError',
+      error: err.message || 'Steward Group Report generation failed',
     })
   }
 })

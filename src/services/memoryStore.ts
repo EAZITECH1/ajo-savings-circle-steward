@@ -58,6 +58,9 @@ export class WalrusMemoryStore implements MemoryStore {
     currentCycle: number
     members: Member[]
     organizerAddress?: string
+    timeZone?: string
+    windowStart?: string
+    windowEnd?: string
   }) {
     this.circleId = params.circleId.trim()
     const res = await fetch('/api/memory/circles', {

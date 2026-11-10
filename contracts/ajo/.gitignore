@@ -1,0 +1,10 @@
+build/*
+!build/ajo/
+build/ajo/*
+!build/ajo/bytecode_modules/
+build/ajo/bytecode_modules/*
+!build/ajo/bytecode_modules/circle.mv
+traces/*
+.trace
+.coverage*
+Pub.*.toml

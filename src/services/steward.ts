@@ -68,7 +68,7 @@ export class AjoSteward implements Steward {
     _verifications: Record<string, VerificationResult>,
     _memories: MemoryRecord[],
     withMemory: boolean,
-    extra?: { circleId?: string; windowStart?: string; windowEnd?: string }
+    extra?: { circleId?: string; windowStart?: string; windowEnd?: string; claimedMemberIds?: string[] }
   ) {
     const res = await fetch('/api/steward/payout-recommendation', {
       method: 'POST',
@@ -79,6 +79,7 @@ export class AjoSteward implements Steward {
         windowEnd: extra?.windowEnd,
         cycle,
         withMemory,
+        claimedMemberIds: extra?.claimedMemberIds,
       }),
     })
 

@@ -181,7 +181,7 @@ export function computeCircleConfigHash(circleData) {
         .sort((a, b) => a.id.localeCompare(b.id))
     : []
 
-  const canonical = JSON.stringify({
+  const canonicalObj = {
     circleId: String(circleData?.circleId || '').trim(),
     circleName: String(circleData?.circleName || '').trim(),
     poolAddress: normalizeSuiAddress(circleData?.poolAddress || ''),
@@ -193,7 +193,19 @@ export function computeCircleConfigHash(circleData) {
       circleData?.organizerAddress || membersCanonical[0]?.address || ''
     ),
     members: membersCanonical,
-  })
+  }
+
+  if (circleData?.timeZone && String(circleData.timeZone).trim()) {
+    canonicalObj.timeZone = String(circleData.timeZone).trim()
+  }
+  if (circleData?.windowStart && String(circleData.windowStart).trim()) {
+    canonicalObj.windowStart = String(circleData.windowStart).trim()
+  }
+  if (circleData?.windowEnd && String(circleData.windowEnd).trim()) {
+    canonicalObj.windowEnd = String(circleData.windowEnd).trim()
+  }
+
+  const canonical = JSON.stringify(canonicalObj)
 
   return crypto.createHash('sha256').update(canonical, 'utf8').digest('hex')
 }
@@ -290,6 +302,17 @@ export function upsertCircleRoster(circleData, options = {}) {
     }
   }
 
+  const normalizedPoolAddress = normalizeSuiAddress(poolAddress || '')
+  const poolOwnerMember = normalizedMembers.find(
+    (member) => normalizeSuiAddress(member.address) === normalizedPoolAddress,
+  )
+  if (poolOwnerMember) {
+    throw new WalletAuthError(
+      `Pool vault address matches member "${poolOwnerMember.name || poolOwnerMember.id}". A contribution sent from that member to the same address is a self-transfer and does not fund a separate pool. Use a dedicated vault address.`,
+      400,
+    )
+  }
+
   const resolvedOrganizer = existing?.organizerAddress
     ? existing.organizerAddress
     : authAddr
@@ -308,6 +331,9 @@ export function upsertCircleRoster(circleData, options = {}) {
     currentCycle: Number(currentCycle) || 1,
     members: normalizedMembers,
     organizerAddress: resolvedOrganizer,
+    ...(circleData.timeZone ? { timeZone: String(circleData.timeZone).trim() } : existing?.timeZone ? { timeZone: existing.timeZone } : {}),
+    ...(circleData.windowStart ? { windowStart: String(circleData.windowStart).trim() } : existing?.windowStart ? { windowStart: existing.windowStart } : {}),
+    ...(circleData.windowEnd ? { windowEnd: String(circleData.windowEnd).trim() } : existing?.windowEnd ? { windowEnd: existing.windowEnd } : {}),
   }
 
   const nextConfigHash = computeCircleConfigHash(nextCore)
@@ -328,6 +354,7 @@ export function upsertCircleRoster(circleData, options = {}) {
     configHash: nextConfigHash,
     previousConfigHash,
     walrusConfigBlobId: isChanged ? undefined : existing?.walrusConfigBlobId,
+    createdAt: existing?.createdAt || circleData.createdAt || new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   }
 
@@ -414,6 +441,16 @@ export function verifyCircleMembership(circleId, { memberId, memberAddress }) {
   })
 
   if (!matched) {
+    if (normAddr && circle.organizerAddress && normalizeSuiAddress(circle.organizerAddress) === normAddr) {
+      return {
+        circle,
+        member: {
+          id: 'organizer',
+          name: 'Organizer',
+          address: circle.organizerAddress,
+        },
+      }
+    }
     throw new WalletAuthError(
       `Authorization failed: member (${memberId || memberAddress || 'unknown'}) is not in circle "${circle.circleName}".`,
       403
@@ -602,6 +639,9 @@ export function serializeCircleConfigForWalrus(circle, approvalMeta = {}) {
     currentCycle: Number(circle.currentCycle) || 1,
     organizerAddress,
     members: minimalMembers,
+    ...(circle.timeZone ? { timeZone: String(circle.timeZone).trim() } : {}),
+    ...(circle.windowStart ? { windowStart: String(circle.windowStart).trim() } : {}),
+    ...(circle.windowEnd ? { windowEnd: String(circle.windowEnd).trim() } : {}),
   }
   const configHash = computeCircleConfigHash(circleConfig)
   const previousConfigHash =
@@ -894,6 +934,9 @@ export function validateWalrusRecordForRestore(hit, expectedCircleId) {
       currentCycle: Number(cfg.currentCycle),
       organizerAddress: normalizeSuiAddress(cfg.organizerAddress),
       members: normalizedMembers,
+      ...(cfg.timeZone ? { timeZone: String(cfg.timeZone).trim() } : {}),
+      ...(cfg.windowStart ? { windowStart: String(cfg.windowStart).trim() } : {}),
+      ...(cfg.windowEnd ? { windowEnd: String(cfg.windowEnd).trim() } : {}),
     }
 
     const computedHash = computeCircleConfigHash(normalizedConfig)
@@ -1102,6 +1145,14 @@ export function issueConfirmationChallenge({ circleId, proposalId, memberId, mem
     )
   }
 
+  // Prevent member impersonation: if proposal is targeted at a specific member, only they can confirm
+  if (storedProposal.memberId && storedProposal.memberId !== member.id) {
+    throw new WalletAuthError(
+      `Authorization mismatch: This agreement proposal specifically pertains to member ID "${storedProposal.memberId}", but the requesting wallet belongs to ${member.name} (${member.id}). Member impersonation is strictly forbidden.`,
+      403
+    )
+  }
+
   const proposalHash = computeProposalHash(storedProposal)
   const normalizedMemberAddress = normalizeSuiAddress(member.address)
   const nonce = crypto.randomUUID()
@@ -1199,6 +1250,15 @@ export async function confirmAndWriteMemory(input, env = process.env) {
     Boolean(publicKeyHex)
 
   let proposalToWrite = storedProposal || inlineProposal
+
+  // Prevent member impersonation: if proposal is targeted at a specific member, only they can confirm
+  if (proposalToWrite?.memberId && proposalToWrite.memberId !== member.id) {
+    throw new WalletAuthError(
+      `Authorization mismatch: This agreement proposal specifically pertains to member ID "${proposalToWrite.memberId}", but the confirming wallet belongs to ${member.name} (${member.id}). Member impersonation is strictly forbidden.`,
+      403
+    )
+  }
+
   let confirmationType = 'organizer_entered'
   let confirmedByLabel = `Organizer-entered record by ${member.name} (${normalizedMemberAddr}) — organizer entry only, not member-signed consensus`
   let verifiedProposalHash = undefined
@@ -1647,6 +1707,121 @@ export async function persistTxDigestAssociationToWalrus(input, env = process.en
       verifiedOnChain: false,
       confirmedBy: confirmedByLabel,
     }
+  } finally {
+    if (typeof client.destroy === 'function') {
+      client.destroy()
+    }
+  }
+}
+
+const recordedLatenessMemories = new Map()
+
+/**
+ * Write a factual, idempotent Walrus Memory entry recording a member's confirmed late contribution.
+ * Labeled strictly as "historical contribution behavior" — never an automatic penalty or accusation.
+ */
+export async function persistHistoricalLatenessToWalrus(input, env = process.env) {
+  const {
+    circleId,
+    cycle,
+    memberAddress,
+    memberId,
+    requiredAmount,
+    amountPaidByDeadline = 0,
+    amountRemainingOutstanding = 0,
+    deadlineTimestamp,
+    latePaymentDigest,
+    latePaymentTimestamp,
+    elapsedMs,
+    elapsedDisplay,
+    memwalClientOverride,
+  } = input || {}
+
+  if (!circleId) {
+    throw new Error('circleId is required to persist historical lateness behavior.')
+  }
+  assertCircleNotQuarantined(circleId)
+
+  const normAddr = normalizeSuiAddress(memberAddress)
+  const trimmedDigest = String(latePaymentDigest || '').trim()
+  const resolvedCycle = Number(cycle) || 1
+  const idempotencyKey = `${circleId}:lateness:${resolvedCycle}:${normAddr}:${trimmedDigest}`
+
+  if (recordedLatenessMemories.has(idempotencyKey)) {
+    return {
+      recorded: true,
+      cached: true,
+      ...recordedLatenessMemories.get(idempotencyKey),
+    }
+  }
+
+  const { circle } = verifyCircleMembership(circleId, { memberAddress: normAddr, memberId })
+  const member = circle.members.find((m) => normalizeSuiAddress(m.address) === normAddr)
+  const memberName = member?.name || memberId || normAddr.slice(0, 6)
+
+  const recordId = `hist-lateness-${circleId}-${resolvedCycle}-${normAddr.slice(2, 8)}-${Date.now()}`
+  const title = `Historical Contribution Behavior: Late Completion by ${memberName} in Cycle ${resolvedCycle}`
+  const quote = `Member ${memberName} (${normAddr}) completed cycle ${resolvedCycle} contribution (${requiredAmount} expected) ${elapsedDisplay || 'late'}. Amount paid by deadline: ${amountPaidByDeadline}; remaining completed on Sui at ${latePaymentTimestamp} in transaction ${trimmedDigest}.`
+  const context = `Factual historical contribution behavior recorded from confirmed Sui on-chain transaction data. Label: historical contribution behavior. Factual record only; not an automatic penalty, membership denial, or change of payout order.`
+  const confirmedBy = `Tatum on-chain confirmed late contribution recorded by system for ${memberName} (${normAddr})`
+
+  const draftRecord = {
+    id: recordId,
+    circleId: circle.circleId,
+    category: 'Member patterns',
+    memoryType: 'historical_behavior',
+    label: 'historical contribution behavior',
+    title,
+    quote,
+    context,
+    cycle: resolvedCycle,
+    date: new Date().toISOString().slice(0, 10),
+    memberId: member?.id || memberId || normAddr,
+    memberAddress: normAddr,
+    requiredAmount,
+    amountPaidByDeadline,
+    amountRemainingOutstanding,
+    deadlineTimestamp,
+    latePaymentDigest: trimmedDigest,
+    latePaymentTimestamp,
+    elapsedMs,
+    elapsedDisplay,
+    confirmedBy,
+    confirmationType: 'tatum_confirmed_chain_event',
+    txDigest: trimmedDigest,
+  }
+
+  const serialized = serializeMemoryForWalrus(draftRecord)
+  const { client, namespace, tunables } = memwalClientOverride
+    ? {
+        client: memwalClientOverride,
+        namespace: resolveCircleNamespace(circle.circleId, env),
+        tunables: loadConfig(env).tunables,
+      }
+    : createMemWalClient(circle.circleId, env)
+
+  try {
+    const rememberResult = await client.rememberAndWait(serialized, namespace, {
+      pollIntervalMs: tunables.pollingIntervalMs,
+      timeoutMs: Math.max(tunables.requestTimeoutMs * 4, 90000),
+      idempotencyKey,
+      dedupe: true,
+    })
+
+    if (!rememberResult || !rememberResult.blob_id) {
+      throw new Error('Walrus Memory write for historical lateness completed without returning a valid blob_id.')
+    }
+
+    const saved = {
+      ...draftRecord,
+      walrusBlobId: rememberResult.blob_id,
+      namespace: rememberResult.namespace || namespace,
+      recorded: true,
+      durableWalrusConfirmed: true,
+    }
+
+    recordedLatenessMemories.set(idempotencyKey, saved)
+    return saved
   } finally {
     if (typeof client.destroy === 'function') {
       client.destroy()
