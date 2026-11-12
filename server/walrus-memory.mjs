@@ -182,6 +182,7 @@ export function memoryTypeToCategory(memoryType, fallback = 'Agreements') {
     case 'agreement':
       return 'Agreements'
     case 'member_pattern':
+    case 'historical_behavior':
       return 'Member patterns'
     case 'reminder_preference':
       return 'Reminder preferences'
@@ -432,6 +433,9 @@ export function clearCircleRuntimeState(circleId, env = process.env) {
     circleRegistry.clear()
     proposalsStore.clear()
     sessionConfirmedCache.clear()
+    recordedLatenessMemories.clear()
+    recordedSplitMemories.clear()
+    recordedReminderOutcomeMemories.clear()
     return
   }
   const trimmed = String(circleId).trim()
@@ -439,6 +443,21 @@ export function clearCircleRuntimeState(circleId, env = process.env) {
   for (const [pid, prop] of Array.from(proposalsStore.entries())) {
     if (prop.circleId === trimmed) {
       proposalsStore.delete(pid)
+    }
+  }
+  for (const key of Array.from(recordedLatenessMemories.keys())) {
+    if (key.startsWith(`${trimmed}:lateness:`)) {
+      recordedLatenessMemories.delete(key)
+    }
+  }
+  for (const key of Array.from(recordedSplitMemories.keys())) {
+    if (key.startsWith(`${trimmed}:split:`)) {
+      recordedSplitMemories.delete(key)
+    }
+  }
+  for (const key of Array.from(recordedReminderOutcomeMemories.keys())) {
+    if (key.startsWith(`${trimmed}:reminder-outcome:`)) {
+      recordedReminderOutcomeMemories.delete(key)
     }
   }
   try {
@@ -559,6 +578,10 @@ export function serializeMemoryForWalrus(record) {
     confirmingAddress: record.confirmingAddress || undefined,
     proposalHash: record.proposalHash || undefined,
     txDigest: record.txDigest || undefined,
+    label: record.label || undefined,
+    elapsedMs: record.elapsedMs !== undefined ? record.elapsedMs : undefined,
+    elapsedDisplay: record.elapsedDisplay || undefined,
+    graceEvaluation: record.graceEvaluation || undefined,
   }
 
   const naturalText = [
@@ -623,6 +646,10 @@ export function parseRecalledMemory(hit, fallbackCircleId = 'default') {
         memberId: meta.memberId,
         memberIds: meta.memberIds || (meta.memberId ? [meta.memberId] : []),
         txDigest: meta.txDigest,
+        label: meta.label,
+        elapsedMs: meta.elapsedMs,
+        elapsedDisplay: meta.elapsedDisplay,
+        graceEvaluation: meta.graceEvaluation,
         distance: hit.distance,
         createdAt: hit.created_at || meta.createdAt || meta.updatedAt,
       }
@@ -1782,6 +1809,8 @@ export async function persistTxDigestAssociationToWalrus(input, env = process.en
 }
 
 const recordedLatenessMemories = new Map()
+const recordedSplitMemories = new Map()
+const recordedReminderOutcomeMemories = new Map()
 
 /**
  * Write a factual, idempotent Walrus Memory entry recording a member's confirmed late contribution.
@@ -1801,6 +1830,7 @@ export async function persistHistoricalLatenessToWalrus(input, env = process.env
     latePaymentTimestamp,
     elapsedMs,
     elapsedDisplay,
+    policyEvaluation,
     memwalClientOverride,
   } = input || {}
 
@@ -1825,11 +1855,30 @@ export async function persistHistoricalLatenessToWalrus(input, env = process.env
   const { circle } = verifyCircleMembership(circleId, { memberAddress: normAddr, memberId })
   const member = circle.members.find((m) => normalizeSuiAddress(m.address) === normAddr)
   const memberName = member?.name || memberId || normAddr.slice(0, 6)
+  const resolvedMemberId = member?.id || memberId || normAddr
 
+  const graceEval = policyEvaluation?.graceEvaluation || null
   const recordId = `hist-lateness-${circleId}-${resolvedCycle}-${normAddr.slice(2, 8)}-${Date.now()}`
-  const title = `Historical Contribution Behavior: Late Completion by ${memberName} in Cycle ${resolvedCycle}`
-  const quote = `Member ${memberName} (${normAddr}) completed cycle ${resolvedCycle} contribution (${requiredAmount} expected) ${elapsedDisplay || 'late'}. Amount paid by deadline: ${amountPaidByDeadline}; remaining completed on Sui at ${latePaymentTimestamp} in transaction ${trimmedDigest}.`
-  const context = `Factual historical contribution behavior recorded from confirmed Sui on-chain transaction data. Label: historical contribution behavior. Factual record only; not an automatic penalty, membership denial, or change of payout order.`
+
+  let title = `Historical Contribution Behavior: Late Completion by ${memberName} in Cycle ${resolvedCycle}`
+  let quote = `Member ${memberName} (${resolvedMemberId}) completed cycle ${resolvedCycle} contribution (${requiredAmount} expected) ${elapsedDisplay || 'late'}. Amount paid by deadline: ${amountPaidByDeadline}; remaining completed on Sui at ${latePaymentTimestamp} in transaction ${trimmedDigest}.`
+  let context = `Factual historical contribution behavior recorded from confirmed Sui on-chain transaction data. Label: historical contribution behavior. Factual record only; not an automatic penalty, membership denial, or change of payout order.`
+
+  if (graceEval) {
+    const ruleRef = graceEval.graceBlobId
+      ? `"${graceEval.graceTitle || 'recorded grace agreement'}" (Rule Blob: ${graceEval.graceBlobId})`
+      : `"${graceEval.graceTitle || 'recorded grace agreement'}"`
+    if (graceEval.honored) {
+      title = `Historical Contribution Behavior: Grace Agreement Honored by ${memberName} in Cycle ${resolvedCycle}`
+      quote = `Member ${memberName} (${resolvedMemberId}) completed cycle ${resolvedCycle} contribution (${requiredAmount} expected) ${elapsedDisplay || 'late'}, within the ${graceEval.durationLabel} grace window of ${ruleRef}. Amount paid by deadline: ${amountPaidByDeadline}; remaining completed on Sui at ${latePaymentTimestamp} in transaction ${trimmedDigest}.`
+      context = `Grace resolution outcome: ${memberName} honored the ${graceEval.durationLabel} grace window in Cycle ${resolvedCycle} (${elapsedDisplay || 'late'}). Label: historical contribution behavior. Factual record only; not an automatic penalty.`
+    } else {
+      title = `Historical Contribution Behavior: Grace Window Exceeded by ${memberName} in Cycle ${resolvedCycle}`
+      quote = `Member ${memberName} (${resolvedMemberId}) completed cycle ${resolvedCycle} contribution (${requiredAmount} expected) ${elapsedDisplay || 'late'}, exceeding the ${graceEval.durationLabel} grace window of ${ruleRef}. Amount paid by deadline: ${amountPaidByDeadline}; remaining completed on Sui at ${latePaymentTimestamp} in transaction ${trimmedDigest}.`
+      context = `Grace resolution outcome: ${memberName} exceeded the ${graceEval.durationLabel} grace window in Cycle ${resolvedCycle} (${elapsedDisplay || 'late'}). Label: historical contribution behavior. Factual record only; not an automatic penalty.`
+    }
+  }
+
   const confirmedBy = `Tatum on-chain confirmed late contribution recorded by system for ${memberName} (${normAddr})`
 
   const draftRecord = {
@@ -1843,7 +1892,8 @@ export async function persistHistoricalLatenessToWalrus(input, env = process.env
     context,
     cycle: resolvedCycle,
     date: new Date().toISOString().slice(0, 10),
-    memberId: member?.id || memberId || normAddr,
+    memberId: resolvedMemberId,
+    memberIds: [resolvedMemberId],
     memberAddress: normAddr,
     requiredAmount,
     amountPaidByDeadline,
@@ -1853,6 +1903,7 @@ export async function persistHistoricalLatenessToWalrus(input, env = process.env
     latePaymentTimestamp,
     elapsedMs,
     elapsedDisplay,
+    graceEvaluation: graceEval || undefined,
     confirmedBy,
     confirmationType: 'tatum_confirmed_chain_event',
     txDigest: trimmedDigest,
@@ -1888,9 +1939,263 @@ export async function persistHistoricalLatenessToWalrus(input, env = process.env
       namespace: rememberResult.namespace || namespace,
       recorded: true,
       durableWalrusConfirmed: true,
+      createdAt: new Date().toISOString(),
     }
 
     recordedLatenessMemories.set(idempotencyKey, saved)
+    if (!sessionConfirmedCache.has(namespace)) {
+      sessionConfirmedCache.set(namespace, new Map())
+    }
+    sessionConfirmedCache.get(namespace).set(saved.walrusBlobId, saved)
+
+    return saved
+  } finally {
+    if (!isCached && typeof client.destroy === 'function') {
+      client.destroy()
+    }
+  }
+}
+
+/**
+ * Return memories confirmed or recorded in the current server session for `circleId`
+ * (zero network calls; prevents vector-index lag from hiding newly written Walrus blobs).
+ */
+export function getSessionConfirmedCircleMemories(circleId, env = process.env) {
+  if (!circleId || isQuarantinedSyntheticRecord(circleId)) return []
+  try {
+    const namespace = resolveCircleNamespace(circleId, env)
+    const nsCache = sessionConfirmedCache.get(namespace)
+    if (!nsCache) return []
+    const out = []
+    for (const rec of nsCache.values()) {
+      if (
+        rec?.walrusBlobId &&
+        !isQuarantinedSyntheticRecord(rec) &&
+        rec.recordKind !== 'circle_config' &&
+        rec.recordKind !== 'tx_digest_association' &&
+        rec.memoryType !== 'circle_config' &&
+        rec.memoryType !== 'tx_digest_association'
+      ) {
+        out.push(rec)
+      }
+    }
+    return out
+  } catch {
+    return []
+  }
+}
+
+/**
+ * Loop 3: Write a factual, idempotent Walrus Memory entry recording a verified multi-tranche (split) completion.
+ */
+export async function persistSplitCompletionToWalrus(input, env = process.env) {
+  const {
+    circleId,
+    cycle,
+    memberAddress,
+    memberId,
+    requiredAmount,
+    txDigests = [],
+    memwalClientOverride,
+  } = input || {}
+
+  if (!circleId) {
+    throw new Error('circleId is required to persist split completion pattern.')
+  }
+  assertCircleNotQuarantined(circleId)
+
+  const digests = Array.isArray(txDigests)
+    ? txDigests.map((d) => String(d || '').trim()).filter(Boolean)
+    : []
+  if (digests.length < 2) {
+    throw new Error('At least 2 transaction digests are required to persist a split completion pattern.')
+  }
+
+  const normAddr = normalizeSuiAddress(memberAddress)
+  const resolvedCycle = Number(cycle) || 1
+  const digestKey = digests.slice().sort().join(',')
+  const idempotencyKey = `${circleId}:split:${resolvedCycle}:${normAddr}:${digestKey}`
+
+  if (recordedSplitMemories.has(idempotencyKey)) {
+    return {
+      recorded: true,
+      cached: true,
+      ...recordedSplitMemories.get(idempotencyKey),
+    }
+  }
+
+  const { circle } = verifyCircleMembership(circleId, { memberAddress: normAddr, memberId })
+  const member = circle.members.find((m) => normalizeSuiAddress(m.address) === normAddr)
+  const memberName = member?.name || memberId || normAddr.slice(0, 6)
+  const resolvedMemberId = member?.id || memberId || normAddr
+
+  const draftRecord = {
+    id: `split-pattern-${circleId}-${resolvedCycle}-${normAddr.slice(2, 8)}-${Date.now()}`,
+    circleId: circle.circleId,
+    category: 'Member patterns',
+    memoryType: 'historical_behavior',
+    label: 'split contribution pattern',
+    title: `Split Contribution Pattern: ${memberName} Completed Cycle ${resolvedCycle} in ${digests.length} Tranches`,
+    quote: `Member ${memberName} (${resolvedMemberId}) completed Cycle ${resolvedCycle} contribution (${requiredAmount} expected) across ${digests.length} verified Sui tranches (${digests.join(', ')}).`,
+    context: `Factual split-payment completion pattern recorded from confirmed Sui on-chain transactions. Label: split contribution pattern. Factual record only; not an automatic penalty or payout-order mutation.`,
+    cycle: resolvedCycle,
+    date: new Date().toISOString().slice(0, 10),
+    memberId: resolvedMemberId,
+    memberIds: [resolvedMemberId],
+    memberAddress: normAddr,
+    requiredAmount,
+    txDigests: digests,
+    txDigest: digests[digests.length - 1],
+    confirmedBy: `Tatum on-chain confirmed ${digests.length}-tranche split completion for ${memberName} (${normAddr})`,
+    confirmationType: 'tatum_confirmed_chain_event',
+  }
+
+  const serialized = serializeMemoryForWalrus(draftRecord)
+  const { client, namespace, tunables, isCached } = memwalClientOverride
+    ? {
+        client: memwalClientOverride,
+        namespace: resolveCircleNamespace(circle.circleId, env),
+        tunables: loadConfig(env).tunables,
+        isCached: false,
+      }
+    : createMemWalClient(circle.circleId, env)
+
+  try {
+    const rememberResult = await withWalrusRetry(() =>
+      client.rememberAndWait(serialized, namespace, {
+        pollIntervalMs: tunables.pollingIntervalMs,
+        timeoutMs: Math.max(tunables.requestTimeoutMs * 4, 90000),
+        idempotencyKey,
+        dedupe: true,
+      })
+    )
+
+    if (!rememberResult || !rememberResult.blob_id) {
+      throw new Error('Walrus Memory write for split completion completed without returning a valid blob_id.')
+    }
+
+    const saved = {
+      ...draftRecord,
+      walrusBlobId: rememberResult.blob_id,
+      namespace: rememberResult.namespace || namespace,
+      recorded: true,
+      durableWalrusConfirmed: true,
+      createdAt: new Date().toISOString(),
+    }
+
+    recordedSplitMemories.set(idempotencyKey, saved)
+    if (!sessionConfirmedCache.has(namespace)) {
+      sessionConfirmedCache.set(namespace, new Map())
+    }
+    sessionConfirmedCache.get(namespace).set(saved.walrusBlobId, saved)
+    return saved
+  } finally {
+    if (!isCached && typeof client.destroy === 'function') {
+      client.destroy()
+    }
+  }
+}
+
+/**
+ * Loop 4: Write a factual, idempotent Walrus Memory entry recording that a verified payment followed an opted-in reminder preference.
+ */
+export async function persistReminderConversionToWalrus(input, env = process.env) {
+  const {
+    circleId,
+    cycle,
+    memberAddress,
+    memberId,
+    txDigest,
+    reminderPreferenceBlobId,
+    reminderPreferenceTitle,
+    memwalClientOverride,
+  } = input || {}
+
+  if (!circleId) {
+    throw new Error('circleId is required to persist reminder conversion outcome.')
+  }
+  assertCircleNotQuarantined(circleId)
+
+  const normAddr = normalizeSuiAddress(memberAddress)
+  const trimmedDigest = String(txDigest || '').trim()
+  const resolvedCycle = Number(cycle) || 1
+  const idempotencyKey = `${circleId}:reminder-outcome:${resolvedCycle}:${normAddr}:${trimmedDigest}`
+
+  if (recordedReminderOutcomeMemories.has(idempotencyKey)) {
+    return {
+      recorded: true,
+      cached: true,
+      ...recordedReminderOutcomeMemories.get(idempotencyKey),
+    }
+  }
+
+  const { circle } = verifyCircleMembership(circleId, { memberAddress: normAddr, memberId })
+  const member = circle.members.find((m) => normalizeSuiAddress(m.address) === normAddr)
+  const memberName = member?.name || memberId || normAddr.slice(0, 6)
+  const resolvedMemberId = member?.id || memberId || normAddr
+
+  const prefRef = reminderPreferenceBlobId
+    ? `"${reminderPreferenceTitle || 'opted-in reminder preference'}" (Blob: ${reminderPreferenceBlobId})`
+    : `"${reminderPreferenceTitle || 'opted-in reminder preference'}"`
+
+  const draftRecord = {
+    id: `reminder-outcome-${circleId}-${resolvedCycle}-${normAddr.slice(2, 8)}-${Date.now()}`,
+    circleId: circle.circleId,
+    category: 'Reminder preferences',
+    memoryType: 'reminder_preference',
+    label: 'reminder conversion outcome',
+    title: `Reminder Conversion Outcome: ${memberName} Completed Cycle ${resolvedCycle}`,
+    quote: `Member ${memberName} (${resolvedMemberId}) completed Cycle ${resolvedCycle} contribution on Sui (${trimmedDigest}) after recording ${prefRef}.`,
+    context: `Factual reminder conversion outcome recorded after Tatum-confirmed Sui payment. Label: reminder conversion outcome. Factual record only; not an automatic penalty or credit score.`,
+    cycle: resolvedCycle,
+    date: new Date().toISOString().slice(0, 10),
+    memberId: resolvedMemberId,
+    memberIds: [resolvedMemberId],
+    memberAddress: normAddr,
+    txDigest: trimmedDigest,
+    reminderPreferenceBlobId: reminderPreferenceBlobId || undefined,
+    confirmedBy: `Tatum on-chain confirmed contribution following opted-in reminder preference for ${memberName} (${normAddr})`,
+    confirmationType: 'tatum_confirmed_chain_event',
+  }
+
+  const serialized = serializeMemoryForWalrus(draftRecord)
+  const { client, namespace, tunables, isCached } = memwalClientOverride
+    ? {
+        client: memwalClientOverride,
+        namespace: resolveCircleNamespace(circle.circleId, env),
+        tunables: loadConfig(env).tunables,
+        isCached: false,
+      }
+    : createMemWalClient(circle.circleId, env)
+
+  try {
+    const rememberResult = await withWalrusRetry(() =>
+      client.rememberAndWait(serialized, namespace, {
+        pollIntervalMs: tunables.pollingIntervalMs,
+        timeoutMs: Math.max(tunables.requestTimeoutMs * 4, 90000),
+        idempotencyKey,
+        dedupe: true,
+      })
+    )
+
+    if (!rememberResult || !rememberResult.blob_id) {
+      throw new Error('Walrus Memory write for reminder conversion outcome completed without returning a valid blob_id.')
+    }
+
+    const saved = {
+      ...draftRecord,
+      walrusBlobId: rememberResult.blob_id,
+      namespace: rememberResult.namespace || namespace,
+      recorded: true,
+      durableWalrusConfirmed: true,
+      createdAt: new Date().toISOString(),
+    }
+
+    recordedReminderOutcomeMemories.set(idempotencyKey, saved)
+    if (!sessionConfirmedCache.has(namespace)) {
+      sessionConfirmedCache.set(namespace, new Map())
+    }
+    sessionConfirmedCache.get(namespace).set(saved.walrusBlobId, saved)
     return saved
   } finally {
     if (!isCached && typeof client.destroy === 'function') {
@@ -2135,7 +2440,7 @@ export async function restoreCircleFromWalrus(circleId, options = {}, env = proc
     // Step 3: Targeted multi-query semantic recall to retrieve decrypted record texts
     const recallQueries = [
       `[Circle: ${trimmedCircleId}] [Type: circle_config] circle configuration roster members poolAddress tokenType contributionPerMember cycleLength currentCycle`,
-      `[Circle: ${trimmedCircleId}] [Type: agreement] [Type: member_pattern] [Type: reminder_preference] circle agreement policy rule grace period member pattern reminder preference`,
+      `[Circle: ${trimmedCircleId}] [Type: agreement] [Type: member_pattern] [Type: historical_behavior] [Type: reminder_preference] circle agreement policy rule grace period member pattern historical contribution behavior reminder preference`,
       `[Circle: ${trimmedCircleId}] [Type: tx_digest_association] [Type: verified_payment_event] transaction digest association sui contribution cycle member`,
     ]
 

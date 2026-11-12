@@ -17,6 +17,8 @@ import {
   verifyCircleMembership,
   listCircleMemories,
   persistHistoricalLatenessToWalrus,
+  persistSplitCompletionToWalrus,
+  persistReminderConversionToWalrus,
   upsertCircleRoster,
 } from '../walrus-memory.mjs'
 import { requireWalletSession, WalletAuthError } from '../wallet-auth.mjs'
@@ -215,6 +217,7 @@ router.post('/sui/discover-contribution', async (req, res) => {
           latePaymentTimestamp: result.latePaymentTimestamp,
           elapsedMs: result.elapsedMs,
           elapsedDisplay: result.elapsedDisplay,
+          policyEvaluation: result.policy,
         })
         historicalLateness = { recorded: true, durableWalrusConfirmed: true, walrusBlobId: record.walrusBlobId }
       } catch (error) {
@@ -222,7 +225,49 @@ router.post('/sui/discover-contribution', async (req, res) => {
       }
     }
 
-    res.json({ ...result, historicalLateness, discoveredDigestCount: digests.length })
+    let splitCompletion = null
+    let reminderConversion = null
+    if (result.status === 'Verified' && cfg.integrations.memwal.configured) {
+      if (Array.isArray(result.txDigests) && result.txDigests.length > 1) {
+        try {
+          const splitRec = await persistSplitCompletionToWalrus({
+            circleId: circle.circleId,
+            cycle,
+            memberAddress: member.address,
+            memberId: member.id,
+            requiredAmount: circle.contributionPerMember,
+            txDigests: result.txDigests,
+          })
+          splitCompletion = { recorded: true, durableWalrusConfirmed: true, walrusBlobId: splitRec.walrusBlobId }
+        } catch (error) {
+          splitCompletion = { recorded: false, durableWalrusConfirmed: false, error: error.message }
+        }
+      }
+      if (result.policy?.reminderPreference?.walrusBlobId && result.txDigest) {
+        try {
+          const remRec = await persistReminderConversionToWalrus({
+            circleId: circle.circleId,
+            cycle,
+            memberAddress: member.address,
+            memberId: member.id,
+            txDigest: result.txDigest,
+            reminderPreferenceBlobId: result.policy.reminderPreference.walrusBlobId,
+            reminderPreferenceTitle: result.policy.reminderPreference.title,
+          })
+          reminderConversion = { recorded: true, durableWalrusConfirmed: true, walrusBlobId: remRec.walrusBlobId }
+        } catch (error) {
+          reminderConversion = { recorded: false, durableWalrusConfirmed: false, error: error.message }
+        }
+      }
+    }
+
+    res.json({
+      ...result,
+      historicalLateness,
+      splitCompletion,
+      reminderConversion,
+      discoveredDigestCount: digests.length,
+    })
   } catch (err) {
     const status = mapAuthErrorStatus(err, 500)
     res.status(status).json({ error: err.message || 'Failed to discover recent contribution' })
@@ -434,6 +479,7 @@ router.post('/sui/verify-contribution', async (req, res) => {
             latePaymentTimestamp: result.latePaymentTimestamp,
             elapsedMs: result.elapsedMs,
             elapsedDisplay: result.elapsedDisplay,
+            policyEvaluation: result.policy,
           })
           historicalLateness = {
             recorded: true,
@@ -474,6 +520,42 @@ router.post('/sui/verify-contribution', async (req, res) => {
       }
     }
 
+    let splitCompletion = null
+    let reminderConversion = null
+    if (result.status === 'Verified' && cfg.integrations.memwal.configured) {
+      if (Array.isArray(result.txDigests) && result.txDigests.length > 1) {
+        try {
+          const splitRec = await persistSplitCompletionToWalrus({
+            circleId: circle.circleId,
+            cycle,
+            memberAddress: member.address,
+            memberId: member.id,
+            requiredAmount: circle.contributionPerMember,
+            txDigests: result.txDigests,
+          })
+          splitCompletion = { recorded: true, durableWalrusConfirmed: true, walrusBlobId: splitRec.walrusBlobId }
+        } catch (error) {
+          splitCompletion = { recorded: false, durableWalrusConfirmed: false, error: error.message }
+        }
+      }
+      if (result.policy?.reminderPreference?.walrusBlobId && result.txDigest) {
+        try {
+          const remRec = await persistReminderConversionToWalrus({
+            circleId: circle.circleId,
+            cycle,
+            memberAddress: member.address,
+            memberId: member.id,
+            txDigest: result.txDigest,
+            reminderPreferenceBlobId: result.policy.reminderPreference.walrusBlobId,
+            reminderPreferenceTitle: result.policy.reminderPreference.title,
+          })
+          reminderConversion = { recorded: true, durableWalrusConfirmed: true, walrusBlobId: remRec.walrusBlobId }
+        } catch (error) {
+          reminderConversion = { recorded: false, durableWalrusConfirmed: false, error: error.message }
+        }
+      }
+    }
+
     console.log('[VERIFY-OUTCOME]', {
       status: result.status,
       code: result.code,
@@ -481,7 +563,7 @@ router.post('/sui/verify-contribution', async (req, res) => {
       error: result.error,
       rawNotes: result.rawNotes,
     })
-    res.json({ ...result, historicalLateness })
+    res.json({ ...result, historicalLateness, splitCompletion, reminderConversion })
   } catch (err) {
     console.error('[VERIFY-ERR]', err)
     const status = mapAuthErrorStatus(err, 500)
@@ -563,6 +645,7 @@ router.post('/sui/evaluate-policy', async (req, res) => {
       memories: serverMemories,
       memberId: targetMember.id,
       memberName: targetMember.name,
+      cycle: Number(cycle) || 1,
     })
     res.json({ policy, chainStatus: serverChainResult.status })
   } catch (err) {

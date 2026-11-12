@@ -10,6 +10,8 @@ import {
 import {
   classifyChainContribution,
   evaluateContributionPolicy,
+  parseGraceAgreementMeta,
+  detectPayoutSwapAgreement,
   normalizeSuiAddress,
   normalizeCoinType,
 } from '../server/payment-policy.mjs'
@@ -347,4 +349,255 @@ test('Address and CoinType normalization', () => {
     normalizeCoinType('0x2::sui::SUI'),
     '0x0000000000000000000000000000000000000000000000000000000000000002::sui::SUI'
   )
+})
+
+test('Policy evaluation: parses custom grace window durations (10 minutes / 10 miniutes) and enforces cycle scope', () => {
+  const grace10m = {
+    id: 'mem-grace-10m',
+    walrusBlobId: 'blob_10m_grace_cycle2',
+    category: 'Agreements',
+    title: '10 Miniutes Grace Window For Cycle 2 Payment',
+    quote: 'Vanessa (m1) is granted a 10 minutes grace window for Cycle 2 payment.',
+    memberId: 'm1',
+    cycle: 2,
+  }
+
+  const parsed = parseGraceAgreementMeta(grace10m, 72)
+  assert.equal(parsed.durationMs, 10 * 60 * 1000)
+  assert.equal(parsed.durationLabel, '10m')
+  assert.equal(parsed.explicitCycle, 2)
+  assert.equal(parsed.isCustomDuration, true)
+
+  const windowEnd = '2026-09-01T12:00:00Z'
+
+  // 1. Arrived 6 minutes after deadline in Cycle 2 -> Honored (within 10m grace window)
+  const late6m = {
+    status: 'Late',
+    code: 'late',
+    txDigest: 'DgLate6Min',
+    amountReceived: 500,
+    timestamp: '2026-09-01T12:06:00Z',
+  }
+  const honoredEval = evaluateContributionPolicy(late6m, {
+    withMemory: true,
+    windowEnd,
+    graceWindowHours: 72,
+    memories: [grace10m],
+    memberId: 'm1',
+    memberName: 'Vanessa',
+    cycle: 2,
+  })
+  assert.equal(honoredEval.chainStatus, 'Late')
+  assert.equal(honoredEval.policyStatus, 'Accepted under recorded grace agreement')
+  assert.equal(honoredEval.countsTowardPot, true)
+  assert.equal(honoredEval.graceEvaluation?.honored, true)
+  assert.equal(honoredEval.graceEvaluation?.durationLabel, '10m')
+  assert.equal(honoredEval.citedMemory?.walrusBlobId, 'blob_10m_grace_cycle2')
+
+  // 2. Arrived 25 minutes after deadline in Cycle 2 -> Exceeded 10m grace window (even though default is 72h!)
+  const late25m = {
+    status: 'Late',
+    code: 'late',
+    txDigest: 'DgLate25Min',
+    amountReceived: 500,
+    timestamp: '2026-09-01T12:25:00Z',
+  }
+  const exceededEval = evaluateContributionPolicy(late25m, {
+    withMemory: true,
+    windowEnd,
+    graceWindowHours: 72,
+    memories: [grace10m],
+    memberId: 'm1',
+    memberName: 'Vanessa',
+    cycle: 2,
+  })
+  assert.equal(exceededEval.chainStatus, 'Late')
+  assert.equal(exceededEval.policyStatus, 'Late (Exceeded grace window)')
+  assert.equal(exceededEval.countsTowardPot, false)
+  assert.equal(exceededEval.graceEvaluation?.honored, false)
+  assert.ok(exceededEval.policyReason.includes('10m grace window'))
+
+  // 3. Cycle 2 agreement does NOT excuse a late payment in Cycle 3
+  const cycle3Eval = evaluateContributionPolicy(late6m, {
+    withMemory: true,
+    windowEnd,
+    graceWindowHours: 72,
+    memories: [grace10m],
+    memberId: 'm1',
+    memberName: 'Vanessa',
+    cycle: 3,
+  })
+  assert.equal(cycle3Eval.policyStatus, 'Unexcused late payment')
+  assert.equal(cycle3Eval.countsTowardPot, false)
+})
+
+test('Policy evaluation: cross-cycle timeliness trajectory compares prior historical_behavior blob with current payment', () => {
+  const priorCycleLatenessBlob = {
+    id: 'hist-lateness-c1-m1',
+    walrusBlobId: 'blob_cycle1_lateness_m1',
+    category: 'Member patterns',
+    memoryType: 'historical_behavior',
+    label: 'historical contribution behavior',
+    title: 'Historical Contribution Behavior: Grace Agreement Honored by Vanessa in Cycle 1',
+    quote: 'Member Vanessa (m1) completed cycle 1 contribution 4m late within 10m grace window.',
+    memberId: 'm1',
+    cycle: 1,
+  }
+
+  // 1. In Cycle 2, Vanessa pays ON TIME -> Policy notes recovery and cites the Cycle 1 Walrus blob
+  const onTimeCycle2 = {
+    status: 'Verified',
+    code: 'verified',
+    txDigest: 'DgOnTimeCycle2',
+    amountReceived: 500,
+    timestamp: '2026-09-02T11:50:00Z',
+  }
+  const recoveredEval = evaluateContributionPolicy(onTimeCycle2, {
+    withMemory: true,
+    windowEnd: '2026-09-02T12:00:00Z',
+    memories: [priorCycleLatenessBlob],
+    memberId: 'm1',
+    memberName: 'Vanessa',
+    cycle: 2,
+  })
+  assert.equal(recoveredEval.chainStatus, 'Verified')
+  assert.equal(recoveredEval.policyStatus, 'Accepted on time (Recovered after prior late cycle)')
+  assert.equal(recoveredEval.countsTowardPot, true)
+  assert.equal(recoveredEval.timelinessTrajectory, 'recovered_on_time')
+  assert.equal(recoveredEval.citedMemory?.walrusBlobId, 'blob_cycle1_lateness_m1')
+
+  // 2. In Cycle 2, if Vanessa is late again without a Cycle 2 grace agreement -> Repeat late cycle
+  const lateCycle2 = {
+    status: 'Late',
+    code: 'late',
+    txDigest: 'DgRepeatLateCycle2',
+    amountReceived: 500,
+    timestamp: '2026-09-02T14:00:00Z',
+  }
+  const repeatLateEval = evaluateContributionPolicy(lateCycle2, {
+    withMemory: true,
+    windowEnd: '2026-09-02T12:00:00Z',
+    memories: [priorCycleLatenessBlob],
+    memberId: 'm1',
+    memberName: 'Vanessa',
+    cycle: 2,
+  })
+  assert.equal(repeatLateEval.chainStatus, 'Late')
+  assert.equal(repeatLateEval.policyStatus, 'Unexcused late payment (Repeat late cycle)')
+  assert.equal(repeatLateEval.countsTowardPot, false)
+  assert.equal(repeatLateEval.timelinessTrajectory, 'repeat_late_unexcused')
+  assert.equal(repeatLateEval.citedMemory?.walrusBlobId, 'blob_cycle1_lateness_m1')
+})
+
+test('Loop 3: Multi-tranche split completion is flagged and cites prior split pattern memory', () => {
+  const splitVerified = {
+    status: 'Verified',
+    code: 'verified',
+    txDigest: 'DgSplit2',
+    txDigests: ['DgSplit1', 'DgSplit2'],
+    amountReceived: 500,
+    timestamp: '2026-09-01T20:00:00Z',
+  }
+  const splitMemory = {
+    id: 'mem_split_c1',
+    walrusBlobId: 'blob_split_pattern_m2',
+    category: 'Member patterns',
+    memoryType: 'historical_behavior',
+    label: 'split contribution pattern',
+    title: 'Split Contribution Pattern: Daniel Completed Cycle 1 in 2 Tranches',
+    quote: 'Daniel completed Cycle 1 in 2 tranches.',
+    memberId: 'm2',
+    memberIds: ['m2'],
+    cycle: 1,
+  }
+
+  const evalRes = evaluateContributionPolicy(splitVerified, {
+    withMemory: true,
+    memories: [splitMemory],
+    memberId: 'm2',
+    memberName: 'Daniel',
+    cycle: 2,
+  })
+  assert.equal(evalRes.chainStatus, 'Verified')
+  assert.equal(evalRes.policyStatus, 'Accepted on time (Split tranches completed under recorded pattern)')
+  assert.equal(evalRes.countsTowardPot, true)
+  assert.equal(evalRes.splitCompletion?.trancheCount, 2)
+  assert.equal(evalRes.splitCompletion?.matchedPatternBlobId, 'blob_split_pattern_m2')
+  assert.equal(evalRes.citedMemory?.walrusBlobId, 'blob_split_pattern_m2')
+})
+
+test('Loop 4: Opted-in reminder preference and prior conversion outcome enrich Pending and Verified evaluations', () => {
+  const prefMem = {
+    id: 'mem_rem_pref_m3',
+    walrusBlobId: 'blob_rem_pref_m3',
+    category: 'Reminder preferences',
+    memoryType: 'reminder_preference',
+    label: 'reminder preference',
+    title: 'Evening 6pm WAT reminder opt-in',
+    quote: 'Sarah prefers evening 6pm WAT reminders 24h before deadline.',
+    memberId: 'm3',
+    memberIds: ['m3'],
+  }
+  const outcomeMem = {
+    id: 'mem_rem_outcome_m3',
+    walrusBlobId: 'blob_rem_outcome_m3',
+    category: 'Reminder preferences',
+    memoryType: 'reminder_preference',
+    label: 'reminder conversion outcome',
+    title: 'Reminder Conversion Outcome: Sarah Completed Cycle 1',
+    quote: 'Sarah completed Cycle 1 after evening reminder.',
+    memberId: 'm3',
+    memberIds: ['m3'],
+    cycle: 1,
+  }
+
+  const pendingEval = evaluateContributionPolicy(
+    { status: 'Pending', code: 'pending', amountReceived: 0 },
+    {
+      withMemory: true,
+      memories: [prefMem, outcomeMem],
+      memberId: 'm3',
+      memberName: 'Sarah',
+      cycle: 2,
+    }
+  )
+  assert.equal(pendingEval.reminderPreference?.walrusBlobId, 'blob_rem_pref_m3')
+  assert.equal(pendingEval.citedMemory?.walrusBlobId, 'blob_rem_pref_m3')
+  assert.match(pendingEval.policyReason, /Follow recorded reminder preference/i)
+  assert.match(pendingEval.policyReason, /Prior on-time settlement/i)
+
+  const verifiedEval = evaluateContributionPolicy(
+    { status: 'Verified', code: 'verified', txDigest: 'DgSarahC2', amountReceived: 500 },
+    {
+      withMemory: true,
+      memories: [prefMem],
+      memberId: 'm3',
+      memberName: 'Sarah',
+      cycle: 2,
+    }
+  )
+  assert.equal(verifiedEval.reminderPreference?.walrusBlobId, 'blob_rem_pref_m3')
+})
+
+test('Loop 5: detectPayoutSwapAgreement detects payout-order swap agreement as advisory guardrail only', () => {
+  const swapMem = {
+    id: 'mem_swap_c2',
+    walrusBlobId: 'blob_swap_agreement_c2',
+    category: 'Agreements',
+    memoryType: 'agreement',
+    title: 'Cycle 2 Payout Order Swap Agreement between Daniel and Sarah',
+    quote: 'Daniel and Sarah agreed to swap payout order for Cycle 2.',
+    cycle: 2,
+    memberId: 'm2',
+  }
+
+  const advisory = detectPayoutSwapAgreement([swapMem], {
+    cycle: 2,
+    scheduledRecipientName: 'Daniel',
+  })
+  assert.equal(advisory?.detected, true)
+  assert.equal(advisory?.walrusBlobId, 'blob_swap_agreement_c2')
+  assert.match(advisory?.advisoryNote || '', /Move contract.*enforces the immutable payout_order/i)
+
+  assert.equal(detectPayoutSwapAgreement([], { cycle: 2, scheduledRecipientName: 'Daniel' }), null)
 })

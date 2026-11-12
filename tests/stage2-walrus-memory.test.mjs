@@ -10,6 +10,10 @@ import {
   proposeCircleMemory,
   issueConfirmationChallenge,
   confirmAndWriteMemory,
+  persistHistoricalLatenessToWalrus,
+  persistSplitCompletionToWalrus,
+  persistReminderConversionToWalrus,
+  getSessionConfirmedCircleMemories,
   computeProposalHash,
   serializeMemoryForWalrus,
   parseRecalledMemory,
@@ -377,4 +381,126 @@ test('Walrus Memory: serializes and parses recalled memory with real blob_id and
   assert.equal(parsed.cycle, 4)
   assert.equal(parsed.memberId, 'm2')
   assert.equal(parsed.confirmationType, 'organizer_entered')
+})
+
+test('Walrus Memory: persistHistoricalLatenessToWalrus records grace resolution outcome and populates sessionConfirmedCache', async () => {
+  const kp1 = new Ed25519Keypair()
+  const addr1 = kp1.getPublicKey().toSuiAddress()
+  const circleId = 'test-circle-lateness-outcome'
+  const testEnv = {
+    MEMWAL_KEY: 'a'.repeat(64),
+    MEMWAL_ACCOUNT_ID: '0x1234',
+    MEMWAL_SERVER_URL: 'https://relayer.memory.walrus.xyz',
+    MEMWAL_NAMESPACE_PREFIX: 'ajo-circle',
+  }
+
+  upsertCircleRoster(
+    {
+      circleId,
+      circleName: 'Lateness Outcome Test Circle',
+      poolAddress: '0xbbbb',
+      contributionPerMember: 1,
+      tokenType: '0x2::sui::SUI',
+      cycleLength: 'Daily',
+      members: [{ id: 'm1', name: 'Vanessa', address: addr1 }],
+    },
+    { authenticatedWalletAddress: addr1 }
+  )
+
+  const mockMemwalClient = {
+    async rememberAndWait(_text, namespace) {
+      return {
+        id: 'job_lateness_1',
+        job_id: 'job_lateness_1',
+        blob_id: 'mock_blob_grace_honored_c2',
+        namespace,
+        owner: '0xowner',
+      }
+    },
+    destroy() {},
+  }
+
+  const saved = await persistHistoricalLatenessToWalrus(
+    {
+      circleId,
+      cycle: 2,
+      memberAddress: addr1,
+      memberId: 'm1',
+      requiredAmount: 1,
+      amountPaidByDeadline: 0,
+      amountRemainingOutstanding: 0,
+      deadlineTimestamp: '2026-09-01T12:00:00Z',
+      latePaymentDigest: '9fK3mP7qR2vW5xY8zB4nC6dF8gH1jL3kM5pQ7rS9tU2v',
+      latePaymentTimestamp: '2026-09-01T12:04:00Z',
+      elapsedMs: 4 * 60 * 1000,
+      elapsedDisplay: '4m late',
+      policyEvaluation: {
+        graceEvaluation: {
+          honored: true,
+          durationMs: 10 * 60 * 1000,
+          durationLabel: '10m',
+          explicitCycle: 2,
+          graceBlobId: 'blob_rule_10m_c2',
+          graceTitle: '10 Miniutes Grace Window For Cycle 2 Payment',
+        },
+      },
+      memwalClientOverride: mockMemwalClient,
+    },
+    testEnv
+  )
+
+  assert.equal(saved.walrusBlobId, 'mock_blob_grace_honored_c2')
+
+  const splitSaved = await persistSplitCompletionToWalrus(
+    {
+      circleId,
+      cycle: 2,
+      memberAddress: addr1,
+      memberId: 'm1',
+      requiredAmount: 1,
+      txDigests: ['DgSplitA1', 'DgSplitA2'],
+      memwalClientOverride: {
+        async rememberAndWait(_text, namespace) {
+          return { blob_id: 'mock_blob_split_c2', namespace }
+        },
+        destroy() {},
+      },
+    },
+    testEnv
+  )
+  assert.equal(splitSaved.walrusBlobId, 'mock_blob_split_c2')
+  assert.equal(splitSaved.label, 'split contribution pattern')
+
+  const remSaved = await persistReminderConversionToWalrus(
+    {
+      circleId,
+      cycle: 2,
+      memberAddress: addr1,
+      memberId: 'm1',
+      txDigest: 'DgRemConvC2',
+      reminderPreferenceBlobId: 'blob_rem_pref_1',
+      reminderPreferenceTitle: '6pm WAT reminder',
+      memwalClientOverride: {
+        async rememberAndWait(_text, namespace) {
+          return { blob_id: 'mock_blob_rem_outcome_c2', namespace }
+        },
+        destroy() {},
+      },
+    },
+    testEnv
+  )
+  assert.equal(remSaved.walrusBlobId, 'mock_blob_rem_outcome_c2')
+  assert.equal(remSaved.label, 'reminder conversion outcome')
+
+  const cached = getSessionConfirmedCircleMemories(circleId, testEnv)
+  const cachedBlobs = cached.map((m) => m.walrusBlobId)
+  assert.ok(cachedBlobs.includes('mock_blob_grace_honored_c2'))
+  assert.ok(cachedBlobs.includes('mock_blob_split_c2'))
+  assert.ok(cachedBlobs.includes('mock_blob_rem_outcome_c2'))
+  assert.ok(saved.title.includes('Grace Agreement Honored by Vanessa in Cycle 2'))
+  assert.ok(saved.quote.includes('10m grace window'))
+  assert.ok(saved.quote.includes('blob_rule_10m_c2'))
+
+  const sessionRecords = getSessionConfirmedCircleMemories(circleId, testEnv)
+  assert.ok(sessionRecords.some((r) => r.walrusBlobId === 'mock_blob_grace_honored_c2'))
 })

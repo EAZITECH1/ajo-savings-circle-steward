@@ -58,17 +58,20 @@ Ajo Steward integrates **Walrus Memory** (`@mysten-incubation/memwal`) on **Walr
 ### What Ajo Steward Stores in Walrus
 Every record is stored under an isolated namespace (`ajo-circle:<circleId>`) using the `schema: 'ajo-steward-memory/v2'` format:
 1. **`circle_config`**: The immutable, versioned configuration of the circle, including Move vault object ID, token type, cadence, time zone, and hash chain.
-2. **`agreement`**: Group decisions (e.g., approved 72-hour grace windows, agreed payout order swaps) signed by members.
+2. **`agreement`**: Group decisions (e.g., approved custom grace windows, agreed payout-order swaps) confirmed by members.
 3. **`member_pattern`**: Recorded operational arrangements (e.g., preference for two-tranche split contributions).
-4. **`historical_behavior`**: Factual records of verified late payments and grace usage, timestamped and linked to Sui transaction hashes.
-5. **`tx_digest_association`**: Cryptographic binding of confirmed Sui transaction digests to circle cycles.
+4. **`reminder_preference`**: Opted-in member reminder preferences and factual reminder conversion outcomes recorded after Tatum-confirmed payments.
+5. **`historical_behavior`**: Factual records of verified late completions, grace-window outcomes, and multi-tranche split completion patterns, timestamped and linked to Sui transaction digests.
+6. **`tx_digest_association`**: Cryptographic binding of confirmed Sui transaction digests to circle cycles.
 
-### How Memories Affect Later Decisions
-* **Semantic Recall:** When a member asks about a deadline or payment, the server queries `client.recall()` using natural language queries.
-* **Grace Policy Evaluation:** In `server/payment-policy.mjs`, when evaluating a late payment:
-  - If **With Memory** is active and an approved grace agreement is recalled, the policy engine marks `Policy: Accepted under recorded grace agreement` (`countsTowardPot: true`).
-  - If **Without Memory** is selected, late payments remain strictly `Policy: Unexcused late payment`.
-* **AI Payout Guidance:** The AI Steward cites recalled Walrus blob IDs (`citedBlobId`) in its payout reasoning so members can verify why a particular distribution was recommended.
+### How Memories Affect Later Decisions (5 Learning Loops)
+Walrus Memory is always active in Ajo Steward. Newly confirmed blobs are also held in an in-process `sessionConfirmedCache` (`server/walrus-memory.mjs`) and merged into `resolveServerRecalledMemories()` (`server/steward-llm.mjs`) so newly written memories are immediately available before external vector indexing catches up:
+1. **Adaptive Grace Windows (`server/payment-policy.mjs`):** `parseGraceAgreementMeta()` parses custom durations (e.g., `10 minutes`, hours, days) and `Cycle N` scope from confirmed `Agreements` memories. When evaluating a `Late` on-chain contribution, `evaluateContributionPolicy()` checks whether the payment arrived within the approved window (`Accepted under recorded grace agreement`, `countsTowardPot: true`) or exceeded it (`Late (Exceeded grace window)`).
+2. **Cross-Cycle Timeliness Trajectory (`server/walrus-memory.mjs`, `server/payment-policy.mjs`):** Confirmed late completions and grace outcomes are logged factually via `persistHistoricalLatenessToWalrus()`. In subsequent cycles, `evaluateContributionPolicy()` compares prior `historical_behavior` records against the current payment to surface factual trajectories (`recovered_on_time`, `repeat_late_unexcused`, etc.) without opaque credit scores.
+3. **Multi-Tranche Split Patterns (`server/payment-policy.mjs`, `server/walrus-memory.mjs`, `server/routes/tatum.mjs`):** When `/sui/discover-contribution` or `/sui/verify-contribution` confirms a multi-tranche `Verified` payment (`txDigests.length > 1`), `persistSplitCompletionToWalrus()` writes the split completion pattern to Walrus. Later `Partial` or multi-tranche evaluations match and cite that recorded `Member patterns` blob.
+4. **Opted-In Reminder Preferences & Conversion Outcomes (`server/payment-policy.mjs`, `server/walrus-memory.mjs`, `server/routes/tatum.mjs`):** Active `Reminder preferences` memories enrich `Pending` and `Verified` policy evaluations with the member's opted-in cadence. Once a payment is verified on Sui under an active preference, `persistReminderConversionToWalrus()` logs a factual conversion outcome blob.
+5. **Payout-Order Swap Advisory Guardrail (`server/payment-policy.mjs`, `server/steward-llm.mjs`, `src/App.tsx`):** `detectPayoutSwapAgreement()` detects confirmed payout-order swap agreements and surfaces a `payoutSwapAdvisory` guardrail in `runPayoutRecommendation()` and the Payout Readiness modal, citing the Walrus blob while explicitly noting that `ajo::circle::claim_cycle` on Sui enforces the immutable `payout_order` set at circle creation.
+* **AI Steward Citations:** `runPayoutRecommendation()` and Steward Chat cite recalled Walrus blob IDs (`citedBlob` / `citedBlobId`) alongside Tatum-verified Sui transaction digests (`txDigest`) so members can inspect both sources directly.
 
 ### Crucial Boundaries & Limitations
 * **Storage vs. Verification:** Walrus Memory stores and recalls encrypted historical context; it **does not verify payments or enforce smart contract rules**.
@@ -163,7 +166,7 @@ npm install
 ```
 
 ### 3. Run Automated Test Suite
-Runs all 58 automated unit, contract, and integration tests:
+Runs the automated unit, contract, and integration test suite (`66` tests; live Tatum Sui testnet lookup skips if `TATUM_API_KEY` is unconfigured):
 ```bash
 npm test
 ```

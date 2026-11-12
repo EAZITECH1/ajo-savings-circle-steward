@@ -433,6 +433,72 @@ export function classifyChainContribution(input) {
 }
 
 /**
+ * Parse explicit cycle scope and grace window duration from a recorded grace agreement memory.
+ * Falls back to `defaultGraceWindowHours` when the memory does not specify a custom duration.
+ *
+ * @param {{ id?: string, walrusBlobId?: string, title?: string, quote?: string, context?: string, cycle?: number }} memory
+ * @param {number} [defaultGraceWindowHours=72]
+ */
+export function parseGraceAgreementMeta(memory, defaultGraceWindowHours = 72) {
+  if (!memory) {
+    const fallbackMs = defaultGraceWindowHours * 3600 * 1000
+    return {
+      durationMs: fallbackMs,
+      durationLabel: `${defaultGraceWindowHours}h`,
+      explicitCycle: null,
+      isCustomDuration: false,
+    }
+  }
+
+  const combinedText = `${memory.title || ''} ${memory.quote || ''} ${memory.context || ''}`
+  const cycleMatch = combinedText.match(/\bcycle\s+(\d+)\b/i)
+  const explicitCycle = cycleMatch ? Number(cycleMatch[1]) : null
+
+  const durMatch = combinedText.match(
+    /\b(\d+(?:\.\d+)?)\s*(?:-|\s)?\s*(minutes?|miniutes?|mins?|hours?|hrs?|days?)\b/i
+  )
+
+  if (durMatch) {
+    const val = Number(durMatch[1])
+    const unitRaw = durMatch[2].toLowerCase()
+    if (Number.isFinite(val) && val > 0) {
+      if (unitRaw.startsWith('m')) {
+        return {
+          durationMs: val * 60 * 1000,
+          durationLabel: `${val}m`,
+          explicitCycle,
+          isCustomDuration: true,
+        }
+      }
+      if (unitRaw.startsWith('h')) {
+        return {
+          durationMs: val * 3600 * 1000,
+          durationLabel: `${val}h`,
+          explicitCycle,
+          isCustomDuration: true,
+        }
+      }
+      if (unitRaw.startsWith('d')) {
+        const hours = val * 24
+        return {
+          durationMs: hours * 3600 * 1000,
+          durationLabel: `${hours}h`,
+          explicitCycle,
+          isCustomDuration: true,
+        }
+      }
+    }
+  }
+
+  return {
+    durationMs: defaultGraceWindowHours * 3600 * 1000,
+    durationLabel: `${defaultGraceWindowHours}h`,
+    explicitCycle,
+    isCustomDuration: false,
+  }
+}
+
+/**
  * Evaluate group policy separately from the chain fact.
  * NEVER relabels `chainResult.status` — returns both `chainStatus` and `policyStatus`.
  *
@@ -441,9 +507,10 @@ export function classifyChainContribution(input) {
  * @param {boolean} options.withMemory
  * @param {string | number} options.windowEnd
  * @param {number} [options.graceWindowHours=72]
- * @param {Array<{ id: string, walrusBlobId?: string, title: string, quote: string, memberId?: string, category?: string }>} [options.memories=[]]
+ * @param {Array<{ id: string, walrusBlobId?: string, title: string, quote: string, context?: string, memberId?: string, category?: string, memoryType?: string, label?: string, cycle?: number }>} [options.memories=[]]
  * @param {string} [options.memberId]
  * @param {string} [options.memberName]
+ * @param {number} [options.cycle]
  */
 export function evaluateContributionPolicy(chainResult, options) {
   const {
@@ -453,10 +520,12 @@ export function evaluateContributionPolicy(chainResult, options) {
     memories = [],
     memberId,
     memberName,
+    cycle,
   } = options
 
   const chainStatus = chainResult.status
   const windowEndMs = typeof windowEnd === 'number' ? windowEnd : Date.parse(windowEnd)
+  const currentCycleNum = Number(cycle) > 0 ? Number(cycle) : null
 
   // Helper to match memories relevant to this member (excluding any quarantined synthetic blobs)
   const memberMemories = withMemory
@@ -477,7 +546,113 @@ export function evaluateContributionPolicy(chainResult, options) {
       })
     : []
 
+  const isHistoricalBehaviorMemory = (m) =>
+    m.label !== 'split contribution pattern' &&
+    m.label !== 'split tranche completion' &&
+    (m.memoryType === 'historical_behavior' ||
+      m.label === 'historical contribution behavior' ||
+      Boolean(m.title?.toLowerCase().includes('historical contribution behavior')) ||
+      Boolean(m.title?.toLowerCase().includes('grace resolution')))
+
+  const priorCycleLatenessMemory =
+    memberMemories.find((m) => {
+      if (!isHistoricalBehaviorMemory(m)) return false
+      if (currentCycleNum && m.cycle && Number(m.cycle) < currentCycleNum) return true
+      if (!currentCycleNum) return true
+      return false
+    }) || null
+
+  const anyHistoricalLatenessMemory =
+    priorCycleLatenessMemory ||
+    memberMemories.find((m) => isHistoricalBehaviorMemory(m)) ||
+    null
+
+  const splitMemory = memberMemories.find(
+    (m) =>
+      m.category === 'Member patterns' &&
+      (m.label === 'split tranche completion' ||
+        m.title?.toLowerCase().includes('split') ||
+        m.quote?.toLowerCase().includes('split') ||
+        m.quote?.toLowerCase().includes('tranche') ||
+        m.quote?.toLowerCase().includes('partial'))
+  )
+
+  const reminderPreferenceMemory = memberMemories.find(
+    (m) => m.category === 'Reminder preferences' && m.label !== 'reminder conversion outcome'
+  )
+  const priorReminderOutcomeMemory = memberMemories.find(
+    (m) => m.category === 'Reminder preferences' && m.label === 'reminder conversion outcome'
+  )
+
   if (chainStatus === 'Verified') {
+    const txDigests = Array.isArray(chainResult.txDigests)
+      ? chainResult.txDigests
+      : chainResult.txDigest
+      ? [chainResult.txDigest]
+      : []
+    const isSplitCompletion = txDigests.length > 1
+    const splitCompletion = isSplitCompletion
+      ? {
+          trancheCount: txDigests.length,
+          txDigests,
+          matchedPatternBlobId: splitMemory?.walrusBlobId || null,
+          matchedPatternTitle: splitMemory?.title || null,
+        }
+      : null
+    const reminderPreference = reminderPreferenceMemory
+      ? {
+          id: reminderPreferenceMemory.id,
+          walrusBlobId: reminderPreferenceMemory.walrusBlobId || null,
+          title: reminderPreferenceMemory.title,
+        }
+      : null
+
+    if (withMemory && priorCycleLatenessMemory) {
+      return {
+        chainStatus,
+        policyStatus: 'Accepted on time (Recovered after prior late cycle)',
+        policyVerdict: 'good_standing',
+        countsTowardPot: true,
+        policyReason: `On-time verified chain contribution meets circle rules. Trajectory: recovered to on-time settlement after prior late completion recorded in "${priorCycleLatenessMemory.title}" (Blob ${priorCycleLatenessMemory.walrusBlobId || priorCycleLatenessMemory.id}).`,
+        citedMemory: priorCycleLatenessMemory,
+        timelinessTrajectory: 'recovered_on_time',
+        splitCompletion,
+        reminderPreference,
+      }
+    }
+
+    if (withMemory && isSplitCompletion) {
+      return {
+        chainStatus,
+        policyStatus: splitMemory
+          ? 'Accepted on time (Split tranches completed under recorded pattern)'
+          : 'Accepted on time (Split tranches completed)',
+        policyVerdict: 'good_standing',
+        countsTowardPot: true,
+        policyReason: splitMemory
+          ? `Contribution verified across ${txDigests.length} tranches on Sui, matching recorded split pattern "${splitMemory.title}" (Blob ${splitMemory.walrusBlobId || splitMemory.id}).`
+          : `Contribution verified across ${txDigests.length} split tranches on Sui before cycle deadline.`,
+        citedMemory: splitMemory || null,
+        timelinessTrajectory: 'on_time',
+        splitCompletion,
+        reminderPreference,
+      }
+    }
+
+    if (withMemory && reminderPreferenceMemory) {
+      return {
+        chainStatus,
+        policyStatus: 'Accepted on time',
+        policyVerdict: 'good_standing',
+        countsTowardPot: true,
+        policyReason: `On-time verified chain contribution meets circle rules. Opted-in reminder preference "${reminderPreferenceMemory.title}" was active for this member.`,
+        citedMemory: priorReminderOutcomeMemory || reminderPreferenceMemory,
+        timelinessTrajectory: 'on_time',
+        splitCompletion,
+        reminderPreference,
+      }
+    }
+
     return {
       chainStatus,
       policyStatus: 'Accepted on time',
@@ -485,34 +660,55 @@ export function evaluateContributionPolicy(chainResult, options) {
       countsTowardPot: true,
       policyReason: 'On-time verified chain contribution meets circle rules.',
       citedMemory: null,
+      timelinessTrajectory: 'on_time',
+      splitCompletion,
+      reminderPreference,
     }
   }
 
   if (chainStatus === 'Late') {
-    const graceMemory = memberMemories.find(
-      (m) =>
-        m.category === 'Agreements' &&
-        (m.title.toLowerCase().includes('grace') ||
-          m.quote.toLowerCase().includes('grace') ||
-          m.title.toLowerCase().includes('late') ||
-          m.quote.toLowerCase().includes('late'))
-    )
+    const graceMemory = memberMemories.find((m) => {
+      if (m.category !== 'Agreements') return false
+      const text = `${m.title || ''} ${m.quote || ''}`.toLowerCase()
+      if (!text.includes('grace') && !text.includes('late')) return false
+      const parsed = parseGraceAgreementMeta(m, graceWindowHours)
+      if (currentCycleNum && parsed.explicitCycle && parsed.explicitCycle !== currentCycleNum) {
+        return false
+      }
+      return true
+    })
 
+    const graceMeta = parseGraceAgreementMeta(graceMemory, graceWindowHours)
     const paymentTimeMs = chainResult.timestamp ? Date.parse(chainResult.timestamp) : NaN
-    const maxGraceDeadlineMs = windowEndMs + graceWindowHours * 3600 * 1000
+    const maxGraceDeadlineMs = windowEndMs + graceMeta.durationMs
     const withinGraceWindow =
       Number.isFinite(paymentTimeMs) &&
       Number.isFinite(maxGraceDeadlineMs) &&
       paymentTimeMs <= maxGraceDeadlineMs
 
     if (withMemory && graceMemory && withinGraceWindow) {
+      const priorNote = priorCycleLatenessMemory
+        ? ` Prior lateness also recorded in Cycle ${priorCycleLatenessMemory.cycle}.`
+        : ''
       return {
         chainStatus: 'Late', // Chain fact remains Late!
         policyStatus: 'Accepted under recorded grace agreement',
         policyVerdict: 'excused_by_agreement',
         countsTowardPot: true,
-        policyReason: `Chain fact is Late, but accepted under recorded grace agreement "${graceMemory.title}" (within ${graceWindowHours}h grace window).`,
+        policyReason: `Chain fact is Late, but accepted under recorded grace agreement "${graceMemory.title}" (within ${graceMeta.durationLabel} grace window).${priorNote}`,
         citedMemory: graceMemory,
+        graceEvaluation: {
+          honored: true,
+          durationMs: graceMeta.durationMs,
+          durationLabel: graceMeta.durationLabel,
+          explicitCycle: graceMeta.explicitCycle,
+          graceMemoryId: graceMemory.id,
+          graceBlobId: graceMemory.walrusBlobId || null,
+          graceTitle: graceMemory.title,
+        },
+        timelinessTrajectory: priorCycleLatenessMemory
+          ? 'repeat_late_excused'
+          : 'late_excused_within_grace',
       }
     }
 
@@ -522,20 +718,39 @@ export function evaluateContributionPolicy(chainResult, options) {
         policyStatus: 'Late (Exceeded grace window)',
         policyVerdict: 'violation',
         countsTowardPot: false,
-        policyReason: `Chain fact is Late and arrived beyond the ${graceWindowHours}h grace window in "${graceMemory.title}".`,
+        policyReason: `Chain fact is Late and arrived beyond the ${graceMeta.durationLabel} grace window in "${graceMemory.title}".`,
         citedMemory: graceMemory,
+        graceEvaluation: {
+          honored: false,
+          durationMs: graceMeta.durationMs,
+          durationLabel: graceMeta.durationLabel,
+          explicitCycle: graceMeta.explicitCycle,
+          graceMemoryId: graceMemory.id,
+          graceBlobId: graceMemory.walrusBlobId || null,
+          graceTitle: graceMemory.title,
+        },
+        timelinessTrajectory: priorCycleLatenessMemory
+          ? 'repeat_late_exceeded_grace'
+          : 'late_exceeded_grace',
       }
     }
 
     return {
       chainStatus: 'Late',
-      policyStatus: 'Unexcused late payment',
+      policyStatus:
+        withMemory && priorCycleLatenessMemory
+          ? 'Unexcused late payment (Repeat late cycle)'
+          : 'Unexcused late payment',
       policyVerdict: 'violation',
       countsTowardPot: false,
       policyReason: withMemory
-        ? 'Payment arrived after cycle deadline with no matching grace agreement.'
+        ? priorCycleLatenessMemory
+          ? `Payment arrived after cycle deadline with no matching grace agreement. Repeat late contribution following Cycle ${priorCycleLatenessMemory.cycle} record "${priorCycleLatenessMemory.title}".`
+          : 'Payment arrived after cycle deadline with no matching grace agreement.'
         : 'Strict timestamp evaluation (memory disabled): payment arrived after cycle deadline.',
-      citedMemory: null,
+      citedMemory: withMemory ? anyHistoricalLatenessMemory : null,
+      timelinessTrajectory:
+        withMemory && priorCycleLatenessMemory ? 'repeat_late_unexcused' : 'late_unexcused',
     }
   }
 
@@ -598,7 +813,18 @@ export function evaluateContributionPolicy(chainResult, options) {
   }
 
   if (chainStatus === 'Pending') {
-    const reminderMemory = memberMemories.find((m) => m.category === 'Reminder preferences')
+    const reminderMemory = reminderPreferenceMemory || priorReminderOutcomeMemory
+    const reminderPreference = reminderPreferenceMemory
+      ? {
+          id: reminderPreferenceMemory.id,
+          walrusBlobId: reminderPreferenceMemory.walrusBlobId || null,
+          title: reminderPreferenceMemory.title,
+        }
+      : null
+    const outcomeNote =
+      priorReminderOutcomeMemory && reminderPreferenceMemory
+        ? ` Prior on-time settlement recorded under this cadence (${priorReminderOutcomeMemory.title}).`
+        : ''
     return {
       chainStatus: 'Pending',
       policyStatus: reminderMemory
@@ -607,9 +833,10 @@ export function evaluateContributionPolicy(chainResult, options) {
       policyVerdict: 'pending',
       countsTowardPot: false,
       policyReason: reminderMemory
-        ? `No payment verified yet. Follow recorded reminder preference "${reminderMemory.title}".`
+        ? `No payment verified yet. Follow recorded reminder preference "${reminderMemory.title}".${outcomeNote}`
         : 'No matching payment transaction verified on Sui yet.',
       citedMemory: reminderMemory || null,
+      reminderPreference,
     }
   }
 
@@ -620,5 +847,47 @@ export function evaluateContributionPolicy(chainResult, options) {
     countsTowardPot: false,
     policyReason: chainResult.error || chainResult.rawNotes || 'Could not verify transaction on Sui.',
     citedMemory: null,
+  }
+}
+
+/**
+ * Detect any confirmed payout-order swap agreement in Walrus Memory and pair it
+ * with the immutable Sui Move contract guardrail (`ajo::circle::claim_cycle` enforces
+ * fixed `payout_order` set at `create_circle` time).
+ */
+export function detectPayoutSwapAgreement(memories = [], options = {}) {
+  const { cycle, scheduledRecipientName = 'scheduled recipient' } = options
+  const currentCycleNum = Number(cycle) > 0 ? Number(cycle) : null
+
+  const swapMemory = memories.find((m) => {
+    if (isQuarantinedSyntheticRecord(m)) return false
+    if (m.category !== 'Agreements') return false
+    const text = `${m.title || ''} ${m.quote || ''} ${m.context || ''}`.toLowerCase()
+    const isSwap =
+      text.includes('swap') ||
+      text.includes('payout order') ||
+      text.includes('payout-order') ||
+      text.includes('turn exchange')
+    if (!isSwap) return false
+    const cycleMatch = text.match(/\bcycle\s+(\d+)\b/i)
+    if (currentCycleNum && cycleMatch && Number(cycleMatch[1]) !== currentCycleNum) {
+      return false
+    }
+    return true
+  })
+
+  if (!swapMemory) {
+    return null
+  }
+
+  return {
+    detected: true,
+    walrusBlobId: swapMemory.walrusBlobId || null,
+    memoryId: swapMemory.id,
+    title: swapMemory.title,
+    quote: swapMemory.quote,
+    memberId: swapMemory.memberId || null,
+    contractInvariant: 'Move claim_cycle enforces fixed payout_order; advisory guardrail only',
+    advisoryNote: `Off-chain payout-order swap agreement "${swapMemory.title}" is recorded on Walrus (Blob ${swapMemory.walrusBlobId || swapMemory.id}). However, the deployed Sui Move contract (ajo::circle::claim_cycle) enforces the immutable payout_order set at circle creation, so ${scheduledRecipientName} must still execute the on-chain claim.`,
   }
 }

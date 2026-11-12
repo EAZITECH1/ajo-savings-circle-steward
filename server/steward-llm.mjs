@@ -4,6 +4,7 @@ import { loadConfig, requireIntegrationConfig } from './config.mjs'
 import {
   getCircleRoster,
   recallCircleMemories,
+  getSessionConfirmedCircleMemories,
   proposeCircleMemory,
   isQuarantinedSyntheticRecord,
 } from './walrus-memory.mjs'
@@ -12,7 +13,10 @@ import {
   getSubmittedDigests,
   verifyMemberContributionOnSui,
 } from './sui-verifier.mjs'
-import { evaluateContributionPolicy } from './payment-policy.mjs'
+import {
+  detectPayoutSwapAgreement,
+  evaluateContributionPolicy,
+} from './payment-policy.mjs'
 
 export const StewardChatLlmSchema = z.object({
   reply: z.string().trim().min(1),
@@ -163,9 +167,14 @@ async function resolveServerRecalledMemories({
       { limit: cfg.tunables.recallLimit },
       env
     )
-    return (recallRes.records || []).filter(
-      (m) => Boolean(m?.walrusBlobId) && !isQuarantinedSyntheticRecord(m)
-    )
+    const sessionConfirmed = getSessionConfirmedCircleMemories(circleId, env)
+    const byBlob = new Map()
+    for (const m of [...(recallRes.records || []), ...sessionConfirmed]) {
+      if (m?.walrusBlobId && !isQuarantinedSyntheticRecord(m) && !byBlob.has(m.walrusBlobId)) {
+        byBlob.set(m.walrusBlobId, m)
+      }
+    }
+    return Array.from(byBlob.values())
   } catch (err) {
     throw new Error(
       `Walrus Memory recall failed (${err.message}). Client-supplied memories are never used as a fallback.`
@@ -313,6 +322,7 @@ export async function runStewardChat(input, options = {}) {
       memories: activeMemories,
       memberId: m.id,
       memberName: m.name,
+      cycle: Number(currentCycle) || 1,
     })
     return {
       memberId: m.id,
@@ -326,6 +336,7 @@ export async function runStewardChat(input, options = {}) {
       policyStatus: policy.policyStatus,
       countsTowardPot: policy.countsTowardPot,
       policyReason: policy.policyReason,
+      timelinessTrajectory: policy.timelinessTrajectory || null,
       citedMemoryBlobId: policy.citedMemory?.walrusBlobId || null,
     }
   })
@@ -476,7 +487,7 @@ export async function runPayoutRecommendation(input, options = {}) {
 
   const activeMemories = await resolveServerRecalledMemories({
     circleId,
-    query: `cycle ${cycle} payout rotation swap grace period split payment risk`,
+    query: `cycle ${cycle} payout rotation swap grace period split payment historical contribution behavior late completion risk`,
     withMemory: Boolean(withMemory),
     cfg,
     env,
@@ -553,6 +564,7 @@ export async function runPayoutRecommendation(input, options = {}) {
       memories: activeMemories,
       memberId: m.id,
       memberName: m.name,
+      cycle: currentCycleNum,
     })
     return {
       member: m,
@@ -562,7 +574,9 @@ export async function runPayoutRecommendation(input, options = {}) {
       policyStatus: policy.policyStatus,
       countsTowardPot: policy.countsTowardPot,
       policyReason: policy.policyReason,
+      timelinessTrajectory: policy.timelinessTrajectory || null,
       citedBlobId: policy.citedMemory?.walrusBlobId || null,
+      citedMemoryTitle: policy.citedMemory?.title || null,
     }
   })
 
@@ -581,6 +595,7 @@ export async function runPayoutRecommendation(input, options = {}) {
     `Eligible members who have NOT yet claimed: [${eligibleNames.join(', ')}].`,
     `You MUST set nextRecipientId to one of the eligible member IDs: [${eligibleMembers.map((m) => m.id).join(', ')}].`,
     'Keep chain facts (Verified, Late, Partial, Pending, Unverified) separate from group policy outcomes.',
+    'When WITH_MEMORY is enabled and a member has a matching record in RECALLED_MEMORIES or a non-null citedBlobId in MEMBER_EVALUATIONS (such as a grace agreement or prior/current cycle historical contribution behavior), you MUST set citedBlobId on that member in memberRisks and reference both their on-chain status/txDigest and the recalled Walrus memory in reasoning.',
     'Respond ONLY with a valid JSON object matching this schema:',
     JSON.stringify({
       nextRecipientId: 'memberId string (MUST be an eligible member who has not yet claimed)',
@@ -598,6 +613,13 @@ export async function runPayoutRecommendation(input, options = {}) {
     }),
   ].join('\n')
 
+  const swapAdvisory = withMemory
+    ? detectPayoutSwapAgreement(activeMemories, {
+        cycle: currentCycleNum,
+        scheduledRecipientName: scheduledRecipient.name,
+      })
+    : null
+
   const rawJson = await callConfiguredLlm(
     [
       { role: 'system', content: systemPrompt },
@@ -610,12 +632,15 @@ export async function runPayoutRecommendation(input, options = {}) {
           scheduledRecipientName: scheduledRecipient.name,
           alreadyClaimedMemberIds: Array.from(claimedMemberIdSet),
           eligibleMemberIds: eligibleMembers.map((m) => m.id),
+          PAYOUT_SWAP_ADVISORY: swapAdvisory,
           RECALLED_MEMORIES: activeMemories.map((m) => ({
             id: m.id,
             walrusBlobId: m.walrusBlobId,
             category: m.category,
             title: m.title,
             quote: m.quote,
+            context: m.context,
+            cycle: m.cycle,
             memberId: m.memberId,
           })),
           MEMBER_EVALUATIONS: memberEvaluations.map((e) => ({
@@ -626,6 +651,7 @@ export async function runPayoutRecommendation(input, options = {}) {
             amountReceived: e.amountReceived,
             policyStatus: e.policyStatus,
             policyReason: e.policyReason,
+            timelinessTrajectory: e.timelinessTrajectory,
             citedBlobId: e.citedBlobId,
           })),
         }),
@@ -653,7 +679,23 @@ export async function runPayoutRecommendation(input, options = {}) {
         ? 'bg-utility-warning-50 text-utility-warning-700 border-utility-warning-200'
         : 'bg-utility-error-50 text-error-primary border-error-subtle'
 
-    const candidateBlob = llmRisk?.citedBlobId || evalItem?.citedBlobId || undefined
+    const validLlmBlob =
+      llmRisk?.citedBlobId && validBlobs.has(llmRisk.citedBlobId) ? llmRisk.citedBlobId : undefined
+    const validEvalBlob =
+      evalItem?.citedBlobId && validBlobs.has(evalItem.citedBlobId)
+        ? evalItem.citedBlobId
+        : undefined
+    const swapFallbackBlob =
+      swapAdvisory?.walrusBlobId &&
+      validBlobs.has(swapAdvisory.walrusBlobId) &&
+      m.id === scheduledRecipient.id
+        ? swapAdvisory.walrusBlobId
+        : undefined
+    const resolvedBlob = withMemory ? validLlmBlob || validEvalBlob || swapFallbackBlob : undefined
+    const citedMemObj = resolvedBlob
+      ? activeMemories.find((mem) => mem.walrusBlobId === resolvedBlob)
+      : undefined
+
     return {
       member: m,
       riskLevel,
@@ -664,10 +706,9 @@ export async function runPayoutRecommendation(input, options = {}) {
           evalItem?.policyStatus || 'Unverified'
         }`,
       action: llmRisk?.action || 'Verify contribution digest',
-      citedBlob:
-        withMemory && candidateBlob && validBlobs.has(candidateBlob)
-          ? candidateBlob
-          : undefined,
+      citedBlob: resolvedBlob,
+      citedMemoryTitle: citedMemObj?.title,
+      txDigest: evalItem?.txDigest || undefined,
     }
   })
 
@@ -678,6 +719,7 @@ export async function runPayoutRecommendation(input, options = {}) {
     claimedMemberIds: Array.from(claimedMemberIdSet),
     eligibleMemberIds: eligibleMembers.map((m) => m.id),
     isCompleted: false,
+    payoutSwapAdvisory: swapAdvisory || undefined,
   }
 }
 
@@ -733,12 +775,13 @@ export async function runGroupReport(input, options = {}) {
       memories,
       memberId: m.id,
       memberName: m.name,
+      cycle,
     })
     return {
       name: m.name,
       address: m.address,
       chainStatus: raw.status || 'Unverified',
-      policyStatus: policy.policyOutcome || 'Unverified',
+      policyStatus: policy.policyStatus || policy.policyOutcome || 'Unverified',
       amountReceived: raw.amountReceived || 0,
       txDigest: raw.txDigest || null,
     }

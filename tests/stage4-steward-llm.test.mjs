@@ -360,3 +360,151 @@ test('Steward LLM: runPayoutRecommendation strictly excludes members who already
   assert.equal(recAllClaimed.isCompleted, true)
   assert.equal(recAllClaimed.nextRecipient, null)
 })
+
+test('Steward LLM: runPayoutRecommendation attaches cross-cycle Walrus blob citation and Tatum txDigest even when LLM omits citedBlobId', async () => {
+  const serverMembers = [
+    { id: 'm1', name: 'Vanessa', address: '0x0001', avatarColor: '' },
+    { id: 'm2', name: 'Daniel', address: '0x0002', avatarColor: '' },
+  ]
+  const serverMemories = [
+    {
+      id: 'hist-c1-m1',
+      walrusBlobId: 'walrus_blob_cycle1_grace_honored',
+      category: 'Member patterns',
+      memoryType: 'historical_behavior',
+      label: 'historical contribution behavior',
+      title: 'Historical Contribution Behavior: Grace Agreement Honored by Vanessa in Cycle 1',
+      quote: 'Vanessa completed cycle 1 contribution 4m late within 10m grace window.',
+      context: 'Grace resolution outcome: Vanessa honored the 10m grace window in Cycle 1.',
+      cycle: 1,
+      memberId: 'm1',
+    },
+  ]
+  const serverVerifications = {
+    m1_2: {
+      status: 'Verified',
+      txDigest: '9fK3mP7qR2vW5xY8zB4nC6dF8gH1jL3kM5pQ7rS9tU2v',
+      amountReceived: 500,
+      timestamp: '2026-09-02T11:45:00Z',
+    },
+  }
+
+  const fakeFetchNoBlobCited = async () => ({
+    ok: true,
+    status: 200,
+    async json() {
+      return {
+        choices: [
+          {
+            message: {
+              content: JSON.stringify({
+                nextRecipientId: 'm2',
+                rationale: 'Daniel is the eligible Cycle 2 recipient; Vanessa recovered to on-time settlement after honoring Cycle 1 grace.',
+                memberRisks: [
+                  {
+                    memberId: 'm1',
+                    riskLevel: 'Low Risk',
+                    reasoning: 'Paid on time in Cycle 2 after honoring Cycle 1 grace window.',
+                    action: 'No action needed',
+                    citedBlobId: null, // LLM omitted citedBlobId; fallback from evaluation must populate it!
+                  },
+                  {
+                    memberId: 'm2',
+                    riskLevel: 'Zero Risk',
+                    reasoning: 'Scheduled recipient.',
+                    action: 'Ready to claim',
+                    citedBlobId: null,
+                  },
+                ],
+              }),
+            },
+          },
+        ],
+      }
+    },
+  })
+
+  const rec = await runPayoutRecommendation(
+    {
+      circleId: 'abuja-builders-circle',
+      cycle: 2,
+      withMemory: true,
+      windowEnd: '2026-09-02T12:00:00Z',
+    },
+    {
+      env: LLM_ENV,
+      fetchFn: fakeFetchNoBlobCited,
+      serverMembers,
+      serverRecalledMemories: serverMemories,
+      serverVerifications,
+    }
+  )
+
+  assert.equal(rec.nextRecipient.id, 'm2')
+  const m1Risk = rec.memberRisks.find((r) => r.member.id === 'm1')
+  assert.equal(m1Risk.citedBlob, 'walrus_blob_cycle1_grace_honored')
+  assert.equal(m1Risk.txDigest, '9fK3mP7qR2vW5xY8zB4nC6dF8gH1jL3kM5pQ7rS9tU2v')
+})
+
+test('Loop 5: runPayoutRecommendation attaches payoutSwapAdvisory and cites swap blob on scheduled recipient without mutating Move rotation', async () => {
+  const serverMembers = [
+    { id: 'm1', name: 'Vanessa', address: '0x0001', avatarColor: '' },
+    { id: 'm2', name: 'Daniel', address: '0x0002', avatarColor: '' },
+  ]
+  const serverMemories = [
+    {
+      id: 'mem_swap_1',
+      walrusBlobId: 'walrus_blob_swap_c2',
+      category: 'Agreements',
+      memoryType: 'agreement',
+      title: 'Cycle 2 Payout Swap Agreement',
+      quote: 'Daniel and Vanessa agreed to swap payout order in Cycle 2.',
+      cycle: 2,
+      memberId: 'm2',
+    },
+  ]
+
+  const fakeFetchSwap = async () => ({
+    ok: true,
+    status: 200,
+    async json() {
+      return {
+        choices: [
+          {
+            message: {
+              content: JSON.stringify({
+                nextRecipientId: 'm2',
+                rationale: 'Daniel is scheduled on-chain; off-chain swap agreement noted as advisory.',
+                memberRisks: [
+                  { memberId: 'm1', riskLevel: 'Zero Risk', reasoning: 'Paid', action: 'None', citedBlobId: null },
+                  { memberId: 'm2', riskLevel: 'Zero Risk', reasoning: 'Scheduled', action: 'Coordinate off-chain swap if agreed', citedBlobId: null },
+                ],
+              }),
+            },
+          },
+        ],
+      }
+    },
+  })
+
+  const rec = await runPayoutRecommendation(
+    {
+      circleId: 'abuja-builders-circle',
+      cycle: 2,
+      withMemory: true,
+      claimedMemberIds: ['m1'],
+    },
+    {
+      env: LLM_ENV,
+      fetchFn: fakeFetchSwap,
+      serverMembers,
+      serverRecalledMemories: serverMemories,
+    }
+  )
+
+  assert.equal(rec.nextRecipient.id, 'm2')
+  assert.equal(rec.payoutSwapAdvisory?.detected, true)
+  assert.equal(rec.payoutSwapAdvisory?.walrusBlobId, 'walrus_blob_swap_c2')
+  const m2Risk = rec.memberRisks.find((r) => r.member.id === 'm2')
+  assert.equal(m2Risk.citedBlob, 'walrus_blob_swap_c2')
+})

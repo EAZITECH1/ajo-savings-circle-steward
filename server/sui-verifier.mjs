@@ -1163,6 +1163,7 @@ export async function verifyMemberContributionOnSui(params, options = {}) {
         memories,
         memberId,
         memberName,
+        cycle,
       })
       const outcome = {
         ...unverified,
@@ -1197,6 +1198,7 @@ export async function verifyMemberContributionOnSui(params, options = {}) {
       memories,
       memberId,
       memberName,
+      cycle,
     })
     const outcome = {
       ...pending,
@@ -1236,6 +1238,7 @@ export async function verifyMemberContributionOnSui(params, options = {}) {
         memories,
         memberId,
         memberName,
+        cycle,
       })
       const outcome = {
         ...failedResult,
@@ -1276,6 +1279,7 @@ export async function verifyMemberContributionOnSui(params, options = {}) {
     memories,
     memberId,
     memberName,
+    cycle,
   })
 
   const outcome = {

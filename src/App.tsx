@@ -244,7 +244,7 @@ export default function App() {
     window.addEventListener('hashchange', handleHash)
     return () => window.removeEventListener('hashchange', handleHash)
   }, [])
-  const [withMemory, setWithMemory] = useState<boolean>(true)
+  const withMemory = true
   const [selectedCycle, setSelectedCycle] = useState<number>(1)
   const [copiedText, setCopiedText] = useState<string | null>(null)
   const [expandedReasoning, setExpandedReasoning] = useState<boolean>(true)
@@ -1389,6 +1389,14 @@ export default function App() {
                   [inputKey]: vRes,
                 }))
               }
+              if (
+                circleId &&
+                (vRes?.historicalLateness?.walrusBlobId ||
+                  vRes?.splitCompletion?.walrusBlobId ||
+                  vRes?.reminderConversion?.walrusBlobId)
+              ) {
+                void refreshMemories(circleId)
+              }
               const note = !isSuccessVerified
                 ? (vRes?.rawNotes || vRes?.policy?.policyReason || vRes?.error || null)
                 : null
@@ -1783,6 +1791,13 @@ export default function App() {
         })
         if (disc && disc.status !== 'Pending') {
           setVerifications((prev) => ({ ...prev, [inputKey]: disc }))
+          if (
+            disc.historicalLateness?.walrusBlobId ||
+            disc.splitCompletion?.walrusBlobId ||
+            disc.reminderConversion?.walrusBlobId
+          ) {
+            void refreshMemories(circleId)
+          }
           if (Array.isArray(disc.txDigests)) {
             for (const d of disc.txDigests) {
               saveClientSubmittedDigest(circleId, selectedCycle, member.address, d)
@@ -1837,6 +1852,14 @@ export default function App() {
         ...prev,
         [inputKey]: res,
       }))
+      if (
+        circleId &&
+        (res?.historicalLateness?.walrusBlobId ||
+          res?.splitCompletion?.walrusBlobId ||
+          res?.reminderConversion?.walrusBlobId)
+      ) {
+        void refreshMemories(circleId)
+      }
     } finally {
       setVerifyingMemberId(null)
     }
@@ -2549,7 +2572,7 @@ export default function App() {
       <div className="flex items-center justify-between mb-sm">
         <span className="text-sm font-semibold text-secondary flex items-center gap-xs">
           <Brain className="size-4 text-fg-brand-primary shrink-0" />
-          Steward Mode
+          Walrus Memory
         </span>
         <span className="text-xs text-tertiary">
           {memwalHealth.connected
@@ -2558,62 +2581,18 @@ export default function App() {
         </span>
       </div>
 
-      <div className="grid grid-cols-2 p-xxs bg-secondary rounded-lg border border-secondary gap-xs">
-        <button
-          type="button"
-          onClick={() => setWithMemory(true)}
-          className={`inline-flex items-center justify-center gap-xs rounded-lg px-lg py-md text-xs font-semibold transition-all border ${
-            withMemory
-              ? 'border-transparent bg-brand-solid text-primary-on-brand shadow-xs'
-              : 'border-transparent text-secondary hover:bg-primary-hover'
-          } focus-visible:ring-2 focus-visible:ring-focus-ring`}
-        >
-          <CheckCircle2
-            className={`size-3.5 shrink-0 ${withMemory ? 'text-fg-white' : 'text-fg-quaternary'}`}
-          />
-          <span>With memory</span>
-        </button>
-        <button
-          type="button"
-          onClick={() => setWithMemory(false)}
-          className={`inline-flex items-center justify-center gap-xs rounded-lg px-lg py-md text-xs font-semibold transition-all border ${
-            !withMemory
-              ? 'border-primary bg-primary text-secondary shadow-xs'
-              : 'border-transparent text-secondary hover:bg-primary-hover'
-          } focus-visible:ring-2 focus-visible:ring-focus-ring`}
-        >
-          <Clock
-            className={`size-3.5 shrink-0 ${
-              !withMemory ? 'text-fg-warning-primary' : 'text-fg-quaternary'
-            }`}
-          />
-          <span>Without memory</span>
-        </button>
-      </div>
-
       <div className="flex gap-md rounded-xl bg-utility-brand-50 p-lg sm:p-xl">
         <Info className="mt-xxs size-4 shrink-0 text-utility-brand-600" aria-hidden="true" />
         <div className="space-y-xs">
           <p className="text-xs font-semibold text-utility-brand-600">
-            {withMemory
-              ? 'Walrus recall + policy evaluation active'
-              : 'Strict timestamp verification only (Walrus recall disabled)'}
+            Walrus recall + policy evaluation active
           </p>
           <p className="text-xs text-tertiary leading-relaxed">
-            {withMemory ? (
-              <>
-                Chain facts (<strong className="text-primary">Verified</strong>,{' '}
-                <strong className="text-primary">Late</strong>,{' '}
-                <strong className="text-primary">Partial</strong>) are kept separate from group
-                policy. Confirmed Walrus agreements can excuse a late payment in policy without
-                altering the on-chain timestamp fact.
-              </>
-            ) : (
-              <>
-                Evaluating on-chain transaction timestamps strictly against the cycle deadline
-                with memory recall disabled.
-              </>
-            )}
+            Chain facts (<strong className="text-primary">Verified</strong>,{' '}
+            <strong className="text-primary">Late</strong>,{' '}
+            <strong className="text-primary">Partial</strong>) are kept separate from group
+            policy. Confirmed Walrus agreements and patterns inform Steward policy without altering
+            on-chain timestamp facts.
           </p>
         </div>
       </div>
@@ -3700,8 +3679,15 @@ export default function App() {
                                             Historical contribution behavior
                                           </span>
                                           {raw?.historicalLateness?.durableWalrusConfirmed ? (
-                                            <span className="text-[10px] text-success-primary font-mono font-medium">
-                                              ✓ Durably stored in Walrus Memory
+                                            <span className="inline-flex items-center gap-xs text-[10px] text-success-primary font-mono font-medium">
+                                              <span>✓ Durably stored in Walrus Memory</span>
+                                              {raw?.historicalLateness?.walrusBlobId && (
+                                                <ExplorerLink
+                                                  type="walrus-blob"
+                                                  value={raw.historicalLateness.walrusBlobId}
+                                                  shorten={true}
+                                                />
+                                              )}
                                             </span>
                                           ) : (
                                             <span className="text-[10px] text-tertiary font-mono">
@@ -3888,6 +3874,19 @@ export default function App() {
                                     >
                                       <span>Policy: {policyStatus}</span>
                                     </span>
+
+                                    {withMemory && raw?.policy?.citedMemory?.walrusBlobId && (
+                                      <div className="inline-flex items-center gap-xs text-[11px] text-secondary pt-xxs flex-wrap">
+                                        <span className="text-tertiary truncate max-w-[200px]" title={raw.policy.citedMemory.title}>
+                                          Rule/Memory: {raw.policy.citedMemory.title}
+                                        </span>
+                                        <ExplorerLink
+                                          type="walrus-blob"
+                                          value={raw.policy.citedMemory.walrusBlobId}
+                                          shorten={true}
+                                        />
+                                      </div>
+                                    )}
                                   </div>
                                 </td>
                               </tr>
@@ -4537,9 +4536,7 @@ export default function App() {
                   <div>
                     <h3 className="text-sm font-semibold text-primary">Ajo AI Steward</h3>
                     <p className="text-xs text-secondary">
-                      {withMemory
-                        ? 'Recalling from Walrus Memory'
-                        : 'Memory recall disabled (strict timestamp evaluation)'}
+                      Recalling from Walrus Memory
                     </p>
                   </div>
                 </div>
@@ -4836,7 +4833,7 @@ export default function App() {
                 <div className="pt-xs border-t border-secondary space-y-xs text-xs">
                   <div className="flex justify-between">
                     <span className="text-tertiary">Mode:</span>
-                    <span className="font-semibold text-brand-primary">{withMemory ? 'With Walrus Memory' : 'Without Memory'}</span>
+                    <span className="font-semibold text-brand-primary">With Walrus Memory</span>
                   </div>
                   <div className="flex justify-between">
                     <span className="text-tertiary">Recalled Blobs:</span>
@@ -5532,6 +5529,28 @@ export default function App() {
                             </div>
                           </div>
 
+                          {/* Payout Swap Advisory Guardrail (Loop 5) */}
+                          {payoutRec?.payoutSwapAdvisory?.detected && (
+                            <div className="p-md rounded-lg bg-utility-warning-50 border border-utility-warning-200 text-xs text-utility-warning-800 leading-relaxed flex items-start gap-xs">
+                              <AlertTriangle className="size-4 text-utility-warning-600 shrink-0 mt-0.5" />
+                              <div className="space-y-xs">
+                                <div>
+                                  <strong>Payout Swap Advisory:</strong>{' '}
+                                  {payoutRec.payoutSwapAdvisory.advisoryNote}
+                                </div>
+                                {payoutRec.payoutSwapAdvisory.walrusBlobId && (
+                                  <div>
+                                    <ExplorerLink
+                                      type="walrus"
+                                      id={payoutRec.payoutSwapAdvisory.walrusBlobId}
+                                      label={`Agreement Blob: ${payoutRec.payoutSwapAdvisory.walrusBlobId.slice(0, 10)}...`}
+                                    />
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+                          )}
+
                           {/* Vault Discrepancy Notice */}
                           {Boolean(isMatchingVault && actualVaultBalance < verifiedContributionSum && !isCycleClaimed(selectedCycle)) && (
                             <div className="p-md rounded-lg bg-utility-warning-50 border border-utility-warning-200 text-xs text-utility-warning-800 leading-relaxed flex items-start gap-xs">
@@ -5655,27 +5674,53 @@ export default function App() {
                       {expandedReasoning && (
                         <div className="p-2xl sm:p-3xl pt-none border-t border-secondary bg-secondary space-y-md text-xs">
                           {withMemory && memoriesList.length > 0 ? (
-                            <ul className="space-y-sm pt-md">
-                              {memoriesList.slice(0, 5).map((m) => (
-                                <li
-                                  key={m.walrusBlobId}
-                                  className="flex items-start gap-sm text-secondary"
-                                >
-                                  <span className="w-1.5 h-1.5 rounded-full bg-brand-solid mt-1.5 shrink-0" />
-                                  <div className="flex flex-wrap items-center gap-xs">
-                                    <span>
-                                      <strong>{m.title}:</strong> {m.context}
-                                    </span>
-                                    <ExplorerLink type="walrus-blob" value={m.walrusBlobId} />
-                                  </div>
-                                </li>
-                              ))}
-                            </ul>
+                            (() => {
+                              const citedBlobSet = new Set(
+                                (payoutRec?.memberRisks || [])
+                                  .map((r: any) => r.citedBlob)
+                                  .filter(Boolean)
+                              )
+                              const orderedMemories = [...memoriesList].sort((a, b) => {
+                                const aCited = citedBlobSet.has(a.walrusBlobId) ? 1 : 0
+                                const bCited = citedBlobSet.has(b.walrusBlobId) ? 1 : 0
+                                return bCited - aCited
+                              })
+                              return (
+                                <ul className="space-y-sm pt-md">
+                                  {orderedMemories.slice(0, 6).map((m) => {
+                                    const isActivelyCited = citedBlobSet.has(m.walrusBlobId)
+                                    return (
+                                      <li
+                                        key={m.walrusBlobId}
+                                        className="flex items-start gap-sm text-secondary"
+                                      >
+                                        <span
+                                          className={`w-1.5 h-1.5 rounded-full mt-1.5 shrink-0 ${
+                                            isActivelyCited
+                                              ? 'bg-utility-success-500'
+                                              : 'bg-brand-solid'
+                                          }`}
+                                        />
+                                        <div className="flex flex-wrap items-center gap-xs">
+                                          {isActivelyCited && (
+                                            <span className="px-xs py-0.5 rounded text-[10px] font-semibold bg-utility-success-50 text-utility-success-700 border border-utility-success-200">
+                                              Cited in Cycle {selectedCycle}
+                                            </span>
+                                          )}
+                                          <span>
+                                            <strong>{m.title}:</strong> {m.context}
+                                          </span>
+                                          <ExplorerLink type="walrus-blob" value={m.walrusBlobId} />
+                                        </div>
+                                      </li>
+                                    )
+                                  })}
+                                </ul>
+                              )
+                            })()
                           ) : (
                             <p className="text-tertiary pt-md">
-                              {withMemory
-                                ? 'No Walrus memories recalled for this circle.'
-                                : 'Memory recall is disabled in Without Memory mode.'}
+                              No Walrus memories recalled for this circle.
                             </p>
                           )}
                         </div>
@@ -5767,28 +5812,34 @@ export default function App() {
                                 <p className="text-secondary">{item.reasoning}</p>
                               </div>
 
-                              {/* Bottom row: Recommended Action + Cited Walrus Blob */}
-                              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-xs text-xs pt-xs">
+                              {/* Bottom row: Recommended Action + Cited Tatum Tx & Walrus Blob */}
+                              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-xs text-xs pt-xs flex-wrap">
                                 <div className="flex items-center gap-xs text-tertiary">
                                   <span className="font-semibold text-secondary">Action:</span>
                                   <span className="text-primary font-medium">{item.action}</span>
                                 </div>
 
-                                {item.citedBlob && (
-                                  <div className="flex items-center gap-xs font-mono text-[11px] text-brand-primary bg-utility-brand-50 px-sm py-0.5 rounded border border-utility-brand-200 shrink-0">
-                                    <Bookmark className="size-3 shrink-0" />
-                                    <span title={item.citedBlob}>
-                                      Blob: {item.citedBlob.slice(0, 10)}...{item.citedBlob.slice(-6)}
-                                    </span>
-                                    <button
-                                      type="button"
-                                      onClick={() => handleCopy(item.citedBlob, `blob-${idx}`)}
-                                      className="underline ml-xxs text-[10px] font-semibold hover:text-brand-secondary cursor-pointer"
-                                    >
-                                      {copiedText === `blob-${idx}` ? 'Copied' : 'Copy'}
-                                    </button>
-                                  </div>
-                                )}
+                                <div className="flex items-center gap-xs flex-wrap">
+                                  {item.txDigest && (
+                                    <ExplorerLink
+                                      type="tx"
+                                      value={item.txDigest}
+                                      network={explorerNetwork}
+                                      shorten={true}
+                                    />
+                                  )}
+                                  {item.citedBlob && (
+                                    <div className="flex items-center gap-xs font-mono text-[11px] text-brand-primary bg-utility-brand-50 px-sm py-0.5 rounded border border-utility-brand-200 shrink-0">
+                                      <Bookmark className="size-3 shrink-0" />
+                                      <ExplorerLink
+                                        type="walrus-blob"
+                                        value={item.citedBlob}
+                                        shorten={true}
+                                        showCopy={true}
+                                      />
+                                    </div>
+                                  )}
+                                </div>
                               </div>
                             </div>
                           )
