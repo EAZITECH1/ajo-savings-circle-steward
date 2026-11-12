@@ -1,119 +1,193 @@
 # Ajo Savings Circle Steward
 
-A non-custodial rotating savings and credit circle (Ajo / Esusu / Tanda / ROSCA) steward built on **Sui Move** (via **Tatum Sui Gateway** on **Sui Testnet**) and **Walrus Memory** (`@mysten-incubation/memwal` on **Walrus Mainnet**).
+A decentralized, non-custodial Rotating Savings and Credit Association (ROSCA / Ajo / Esusu / Tanda) steward combining **Sui Move smart contract vaults** on **Sui Testnet**, **Tatum blockchain indexing** for transaction verification, **Walrus Memory** (`@mysten-incubation/memwal`) on **Walrus Mainnet** for permanent decentralized memory, and an **impartial AI Steward** for payout guidance.
 
 ---
 
-## Overview
+## 1. Project Overview
 
-Ajo Steward modernizes traditional rotating savings groups by eliminating organizer bookkeeping burnout, screenshot disputes, and custody risks:
-- **Dedicated Move Shared Vault Objects**: Circles hold pooled funds in dedicated on-chain Move shared objects (`Circle<phantom T>`) on Sui Testnet. Neither Ajo Steward, Tatum, nor any individual holds custody.
-- **Direct Wallet-Authorized Deposits & Claims**: Members sign deposits directly from their own Sui wallets. Scheduled recipients claim the accumulated cycle pot directly to their wallets via MoveCall.
-- **Authoritative On-Chain Verification via Tatum Gateway**: Real-time inspection of Sui Testnet transaction blocks, balance changes, and Move events without relying on manual receipts.
-- **Decentralized Agreement Persistence via Walrus Memory**: Circle rules, member rosters, and approved grace policies are cryptographically sealed and stored on Walrus Mainnet for semantic recall across sessions.
-- **Advisory AI Steward**: An LLM-powered assistant evaluates server-recalled Walrus memories alongside verified on-chain Sui facts to provide distribution recommendations and answer circle inquiries.
+### What Ajo Steward Does
+Ajo Steward modernizes community peer-to-peer rotating savings groups. Instead of relying on a human organizer to hold pooled money in a personal bank account or spreadsheet, Ajo Steward:
+1. Deploys a dedicated, non-custodial Move smart contract vault object (`Circle<T>`) for each savings circle.
+2. Directs members to sign deposit transactions straight from their Sui wallets into the on-chain vault.
+3. Automatically inspects and verifies deposit transactions via **Tatum Sui Gateway** without requiring manual screenshot receipts.
+4. Cryptographically commits circle rules, accepted grace policies, and payment behavior logs to **Walrus Mainnet** using SEAL threshold encryption.
+5. Uses an **Advisory AI Steward** to synthesize verified on-chain facts and recalled Walrus memories to recommend fair payout distributions.
 
----
+### Who It Is For
+* **Community Savers & Peer Groups:** Friends, colleagues, and informal collectives practicing traditional rotating credit (Ajo, Esusu, Chit Funds, Tandas, Pardnas) seeking transparency without risking organizer default.
+* **Circle Organizers:** Community leaders burdened with manual bookkeeping, tracking who paid late, and answering endless status questions.
 
-## Core Architecture & Security Invariants
+### The Actual User Journey
+1. **Circle Creation & Move Vault Deployment:** The organizer defines contribution amounts, cadence (daily, weekly, monthly), and member addresses. The organizer signs one Sui wallet transaction to instantiate a fresh on-chain `Circle<T>` shared object, and the circle configuration is committed to Walrus Memory.
+2. **Member Acceptance & Cycle Activation:** Members connect their Sui wallets and accept circle terms. Once initialized, the cycle countdown begins.
+3. **Contribution & Tatum Verification:** Members submit deposits (`contribute<T>`) to the vault. When a transaction digest is submitted, the backend queries Tatum Sui Gateway to confirm the sender, recipient vault, coin type, amount, and timestamp.
+4. **Governance & Memory Storage:** If a member requires an approved grace period or payout swap, the agreement is signed and permanently saved to Walrus. Late payments are factually logged to Walrus as historical behavior.
+5. **Pot Distribution:** Payout claims (`claim_cycle<T>`) are executed on-chain directly by the scheduled recipient.
+6. **Disaster Recovery:** If the application restarts, the entire circle state is reconstructed from Walrus Mainnet and re-verified on-chain via Tatum.
 
-### 1. On-Chain Move Shared Vault Objects (`contracts/ajo`)
-- **Package Deployment**: Published Move package `0x0d7dfa83d83c9187781a8acb0af9f7797bce6c157e417503fa18c04f03238466` on Sui Testnet.
-- **Dedicated Vault per Circle**: When creating a circle, the organizer signs 1 wallet transaction to instantiate a fresh, dedicated Move shared object `Circle<T>`.
-- **Contribution Flow**: During an active cycle, members sign a deposit transaction (`deposit_contribution<T>`) transferring exact tokens from their wallet into the shared vault object.
-- **Claim Flow**: Payouts are claimed directly by the scheduled recipient via `claim_cycle_pot<T>`. The contract guarantees that claims before the deadline require 100% funding; after the deadline passes, any funds accumulated in the vault can be claimed incrementally.
-- **Supported Tokens**: Authoritative coin types for **SUI** (`0x2::sui::SUI`, 9 decimals) and **USDC** (`0xa1ec7fc00a6f40db9693ad1415d0c193ad3906494428cf252621037bd7117e29::usdc::USDC`, 6 decimals). WAL is explicitly deprecated for new circles.
-
-### 2. Digest-First Sui Verification via Tatum Gateway
-- Queries Tatum Sui Gateway at `POST https://sui-{network}.gateway.tatum.io/graphql` (header `x-api-key: <TATUM_API_KEY>`) and JSON-RPC / fullnodes.
-- Rate-limited queue with exponential backoff inspects `effects.status`, `effects.timestamp`, and `effects.balanceChanges.nodes` against the circle's registered vault address, token type, expected contribution, and cycle window (`windowStart` .. `windowEnd`).
-- Returns explicit states: `Verified`, `Late`, `Partial` (with multi-tranche aggregation), `WrongToken`, `WrongAmount`, `Pending` (only when indexing), or `Unverified`.
-- **Tatum Operational Boundary**: Tatum queries and verifies blockchain evidence; it never custodies funds, signs transactions, or guarantees off-chain member compliance.
-
-### 3. Strict Separation of Chain Facts vs. Group Policy vs. AI Suggestions
-- **Chain Fact**: The immutable on-chain record (`Verified`, `Late`, `Partial`, `Unverified`). A deposit received after `windowEnd` remains `Chain: Late` permanently.
-- **Group Policy**: When **With memory** is active and an approved grace agreement is recalled from Walrus Memory on the server, the policy engine produces `Policy: Accepted under recorded grace agreement` (`countsTowardPot: true`). When **Without memory** is chosen, late payments evaluate strictly as `Policy: Unexcused late payment`.
-- **Steward LLM**: AI suggestions are strictly advisory and clearly marked as such in the UI. The model only reads server-verified contributions and server-recalled Walrus memories.
-
-### 4. Walrus Mainnet Memory Store (`schema: 'ajo-steward-memory/v2'`)
-- Encrypted semantic memory backed by `@mysten-incubation/memwal` on Walrus Mainnet.
-- **Record Types**:
-  - `circle_config`: Versioned and hash-chained circle configurations, cadence, time zone, and minimal member rosters (`id`, `name`, normalized `address`).
-  - `agreement` / `member_pattern`: Confirmed circle agreements and policy decisions with proposal hashes, confirmation types, and signer addresses.
-  - `tx_digest_association`: Confirmed association of transaction digests with circle cycles.
-- **Restart Recovery**: Restores and re-indexes state on container restart via `client.restore`, `listMemories`, and `recall`, re-verifying all transaction digests live against Tatum.
-- **Data Minimization**: Private keys, unconsumed challenge nonces, and session tokens are never written to or restored from Walrus (`FORBIDDEN_SECRET_KEYS` protection).
-
-### 5. Address-Bound Wallet Authentication & Anti-Impersonation
-- Sensitive API routes (`/api/memory/*`, `/api/tatum/sui/*`, `/api/steward/*`) require signed wallet session challenges (`server/wallet-auth.mjs`).
-- Cryptographic signature verification using `@mysten/sui` supports Ed25519, Secp256k1, and Secp256r1/zkLogin keys, proving that the signing public key derives to the registered member address.
-- Memory proposals can only be signed by the specific member address referenced or recorded as organizer-entered by the circle organizer.
-
-### 6. Network-Aware Explorer Citations
-- Deep-linking throughout the application links transaction digests, wallet addresses, Move vault objects, and token contracts to **Suiscan (Testnet)**.
-- Memory records and recovery details link directly to **Walruscan (Mainnet)** via validated Blob IDs.
-- Displayed identifiers feature multi-tier responsive truncation (`max-w-[160px]` to `max-w-[460px]`) with copy-to-clipboard affordances.
+### Concise Status Statement
+* **Sui Smart Contracts:** **Live on Sui Testnet** (Move Package [`0x0d7dfa83d83c9187781a8acb0af9f7797bce6c157e417503fa18c04f03238466`](https://suiscan.xyz/testnet/package/0x0d7dfa83d83c9187781a8acb0af9f7797bce6c157e417503fa18c04f03238466)).
+* **Tatum Chain Indexing:** **Live on Sui Testnet** via Tatum Sui Gateway GraphQL and RPC.
+* **Walrus Memory:** **Live on Walrus Mainnet** via `https://relayer.memory.walrus.xyz` under Account Object [`0xf6b75c6fd44e685829e0baa04077c42c09bed658819e921126dc11ce8c3175d4`](https://suiscan.xyz/mainnet/object/0xf6b75c6fd44e685829e0baa04077c42c09bed658819e921126dc11ce8c3175d4).
+* **AI Steward:** **Live (Advisory Only)** via OpenAI-compatible chat completions. The AI cannot move funds or execute transactions.
+* **Live Deployment:** Hosted on Railway at [https://ajo-steward.up.railway.app](https://ajo-steward.up.railway.app).
 
 ---
 
-## Environment Variables
+## 2. Problem & Solution
 
-Copy `.env.example` to `.env` (gitignored) and populate credentials for the integrations you wish to enable:
+### The Real-World Problem
+Traditional rotating savings associations rely entirely on interpersonal trust and informal administration:
+* **Custodial Risk:** The organizer collects all contributions into a personal bank or wallet. If the organizer falls ill, experiences an account freeze, or absconds, the entire group loses their savings.
+* **Bookkeeping Burnout & Screenshot Disputes:** Members send conflicting screenshots, split payments across different days, or pay via wrong tokens. Organizers spend hours reconciling chat logs.
+* **Rigid Default vs. Social Realities:** Life happens—members occasionally need a 2-day grace window due to payroll delays. When rules are purely informal, organizers face accusations of favoritism or unfair penalties.
 
-| Variable | Required For | Description |
-| :--- | :--- | :--- |
-| `PORT` | Optional (default `3000`) | Express + Vite server port |
-| `TATUM_API_KEY` | Tatum Sui Verifier | Tatum API key (`x-api-key` header) |
-| `TATUM_API_BASE` | Tatum Sui Verifier | Tatum API base URL (e.g. `https://api.tatum.io`) |
-| `SUI_NETWORK` | Tatum Sui Verifier | `testnet` (default) or `mainnet` |
-| `SUI_TOKEN_TYPE` | Tatum Sui Verifier | Move coin type (e.g. `0x2::sui::SUI`) |
-| `SUI_TOKEN_DECIMALS` | Optional (default `9`) | Token decimals (`9` for SUI, `6` for USDC) |
-| `MEMWAL_KEY` | Walrus Memory | Ed25519 delegate private key (`64`-hex or `suiprivkey1...`) |
-| `MEMWAL_ACCOUNT_ID` | Walrus Memory | `MemWalAccount` Sui object ID (`0x...`) |
-| `MEMWAL_SERVER_URL` | Walrus Memory | Walrus Memory relayer URL (`https://relayer.memory.walrus.xyz`) |
-| `MEMWAL_NAMESPACE_PREFIX` | Optional (`ajo-circle`) | Prefix for per-circle namespaces |
-| `LLM_API_KEY` | Steward Chat & Payout | API key for OpenAI-compatible chat completions provider |
-| `LLM_BASE_URL` | Steward Chat & Payout | Base URL (e.g. `https://openrouter.ai/api/v1`) |
-| `LLM_MODEL` | Steward Chat & Payout | Model identifier (e.g. `openai/gpt-4o-mini`) |
-| `GRACE_WINDOW_HOURS` | Optional (default `72`) | Approved late-payment grace window in hours |
-| `PARTIAL_PAYMENT_WINDOW_HOURS` | Optional (default `48`) | Max hours between two split-payment tranches |
-| `POLLING_INTERVAL_MS` | Optional (default `1500`) | Job polling interval in ms |
-| `RATE_LIMIT_RPS` | Optional (default `3`) | Outbound RPC requests per second limit |
-| `RATE_LIMIT_MAX_RETRIES` | Optional (default `3`) | Max retries on HTTP 429 / transient errors |
-| `RATE_LIMIT_BACKOFF_MS` | Optional (default `1000`) | Base exponential backoff in ms |
-| `RECALL_LIMIT` | Optional (default `10`) | Default top-K memories recalled per query |
-| `REQUEST_TIMEOUT_MS` | Optional (default `20000`) | Per-request HTTP timeout in ms |
+### How Ajo Steward Solves It
+* **Non-Custodial Move Vaults:** Funds are deposited directly into dedicated Move shared objects (`Circle<T>`). Neither the organizer, the backend server, Tatum, nor the AI Steward can withdraw pooled funds. Only the pre-scheduled recipient can execute `claim_cycle<T>`.
+* **Authoritative Blockchain Evidence:** Tatum's GraphQL gateway inspects raw transaction blocks, verifying exact net balance changes, coin types, and timestamps against cycle deadlines.
+* **Separation of Chain Facts vs. Social Policy:** A late payment is permanently recorded on-chain as `Late`. However, if the circle previously consensus-approved a grace period, Walrus Memory surfaces that policy so the AI Steward and group recognize it as excused.
+* **No Exaggerated Claims:** Ajo Steward does not claim to guarantee loan repayment or physically force an off-chain person to pay. Instead, it provides an auditable, trust-minimized framework where escrow is non-custodial and payment history is immutable.
 
 ---
 
-## Setup & Commands
+## 3. How Walrus Memory Changes the Product
 
+Ajo Steward integrates **Walrus Memory** (`@mysten-incubation/memwal`) on **Walrus Mainnet** to provide decentralized, tamper-proof long-term memory for community governance without relying on a centralized Web2 database.
+
+### What Ajo Steward Stores in Walrus
+Every record is stored under an isolated namespace (`ajo-circle:<circleId>`) using the `schema: 'ajo-steward-memory/v2'` format:
+1. **`circle_config`**: The immutable, versioned configuration of the circle, including Move vault object ID, token type, cadence, time zone, and hash chain.
+2. **`agreement`**: Group decisions (e.g., approved 72-hour grace windows, agreed payout order swaps) signed by members.
+3. **`member_pattern`**: Recorded operational arrangements (e.g., preference for two-tranche split contributions).
+4. **`historical_behavior`**: Factual records of verified late payments and grace usage, timestamped and linked to Sui transaction hashes.
+5. **`tx_digest_association`**: Cryptographic binding of confirmed Sui transaction digests to circle cycles.
+
+### How Memories Affect Later Decisions
+* **Semantic Recall:** When a member asks about a deadline or payment, the server queries `client.recall()` using natural language queries.
+* **Grace Policy Evaluation:** In `server/payment-policy.mjs`, when evaluating a late payment:
+  - If **With Memory** is active and an approved grace agreement is recalled, the policy engine marks `Policy: Accepted under recorded grace agreement` (`countsTowardPot: true`).
+  - If **Without Memory** is selected, late payments remain strictly `Policy: Unexcused late payment`.
+* **AI Payout Guidance:** The AI Steward cites recalled Walrus blob IDs (`citedBlobId`) in its payout reasoning so members can verify why a particular distribution was recommended.
+
+### Crucial Boundaries & Limitations
+* **Storage vs. Verification:** Walrus Memory stores and recalls encrypted historical context; it **does not verify payments or enforce smart contract rules**.
+* **Saving vs. Recalling:** Storing a blob to Walrus (`rememberAndWait`) returns a `blob_id`. Successful recall (`recall`) depends on semantic relevance and vector ranking.
+* **Recall Ceilings:** MemWal recall returns similarity-ranked matches up to a configured limit (`tunables.recallLimit`, default 10; max 100). For full disaster recovery, Ajo Steward combines `client.recall()` with paginated `client.listMemories()` inventory audits to ensure zero missing blobs.
+* **Rate Limits:** To avoid HTTP 429 rate limits from the public relayer, the backend pools `MemWal` clients in-memory (`memwalClientCache`) and applies exponential backoff retries (`withWalrusRetry`).
+
+Verified receipts and blob IDs are documented in [WALRUS_BLOBS.md](WALRUS_BLOBS.md).
+
+---
+
+## 4. How Tatum Powers Ajo Steward
+
+Tatum serves as the authoritative blockchain indexer and verification backbone for Sui Testnet.
+
+### Exact APIs Called
+The server interacts with Tatum via [server/tatum-client.mjs](server/tatum-client.mjs) and [server/sui-verifier.mjs](server/sui-verifier.mjs):
+1. **Tatum Sui Gateway GraphQL (`POST https://sui-testnet.gateway.tatum.io/graphql`):**
+   - Header: `x-api-key: <TATUM_API_KEY>`
+   - Query: `GetSuiTransaction($digest: String!)` — retrieves `digest`, `sender.address`, `effects.status`, `effects.timestamp`, and `effects.balanceChanges.nodes { owner.address, coinType.repr, amount }`.
+   - Query: `FindRecentContributions($pool: SuiAddress!, $sender: SuiAddress!)` — queries `transactions(last: 50, filter: { affectedAddress: $pool, sentAddress: $sender })` to recover transactions when the user loses their digest.
+2. **Tatum RPC (`POST https://sui-testnet.gateway.tatum.io`):**
+   - Fallback methods: `sui_getTransactionBlock` and `suix_queryTransactionBlocks`.
+
+### Verification Logic & Data Handling
+* **Sender & Recipient:** Checks that `sender.address` matches the registered member and that the net incoming balance change lands on the circle's registered shared vault object ID.
+* **Coin Type Normalization:** Verifies that `coinType.repr` matches the circle's configured token type (`0x2::sui::SUI` or `0xa1ec7fc...::usdc::USDC`).
+* **Amount Checks:** Verifies that the net received amount matches or exceeds the required contribution in base units.
+* **Timestamp & Cycle Deadlines:** Compares `effects.timestamp` against `windowStart` and `windowEnd`.
+* **Payment Classifications:**
+  - `Verified`: Net amount received on-time before `windowEnd`.
+  - `Late`: Valid transfer received after `windowEnd`.
+  - `Partial`: Incomplete transfer; aggregated if a second tranche clears within `partialPaymentWindowHours` (48h).
+  - `WrongToken` / `WrongAmount`: Mismatched asset or balance change.
+  - `Unverified`: Transaction failed, missing on-chain, or invalid recipient. (Never reported as `Pending` once indexed).
+* **Double-Claim Prevention:** An in-memory store (`submittedTransactionsStore`) records `(txDigest, network)` to prevent cross-member reuse of transaction hashes.
+
+### Operational Boundaries
+* **Tatum does not custody funds** or hold private keys.
+* **Tatum does not sign transactions**; all MoveCalls are signed by user wallets.
+* **Tatum does not enforce group policy**; it provides verified on-chain evidence to the application's policy engine.
+
+---
+
+## 5. Technical Documentation Links
+
+* 📐 **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md):** Detailed system architecture, data flows, Mermaid diagrams, and Move contract specifications.
+* ⚖️ **[JUDGING.md](JUDGING.md):** Hackathon evaluation guide, criteria-to-evidence matrix, test suite breakdown, and reproduction steps.
+* 🦭 **[WALRUS_BLOBS.md](WALRUS_BLOBS.md):** 57 real, verified Walrus Mainnet blob receipts with explorer links and audit details.
+
+---
+
+## 6. Environment Configuration (.env)
+
+Copy [.env.example](.env.example) to `.env` (gitignored). Never commit or expose private keys or API keys.
+
+| Variable | Required For | Description | Default / Example |
+| :--- | :--- | :--- | :--- |
+| `PORT` | Local Server | Port for Express + Vite server | `3000` |
+| `TATUM_API_KEY` | Tatum Sui Verifier | API key for Tatum Gateway (`x-api-key`) | Required for verification |
+| `TATUM_API_BASE` | Tatum Sui Verifier | Tatum API base endpoint | `https://api.tatum.io` |
+| `SUI_NETWORK` | Tatum Sui Verifier | Sui network for contract vaults | `testnet` |
+| `SUI_TOKEN_TYPE` | Tatum Sui Verifier | Move coin type for contributions | `0x2::sui::SUI` |
+| `SUI_TOKEN_DECIMALS` | Tatum Sui Verifier | Token decimal precision | `9` (SUI) or `6` (USDC) |
+| `AJO_PACKAGE_ID` | Smart Contracts | Published Sui Move package ID | `0x0d7dfa83d83c9...3238466` |
+| `MEMWAL_KEY` | Walrus Memory | Ed25519 delegate private key for relayer | 64-hex private key |
+| `MEMWAL_ACCOUNT_ID` | Walrus Memory | `MemWalAccount` Sui object ID (Mainnet) | `0xf6b75c6fd44e...3175d4` |
+| `MEMWAL_SERVER_URL` | Walrus Memory | Public Walrus Memory relayer | `https://relayer.memory.walrus.xyz` |
+| `MEMWAL_NAMESPACE_PREFIX` | Walrus Memory | Prefix for circle namespaces | `ajo-circle` |
+| `LLM_API_KEY` | AI Steward | API key for OpenAI-compatible LLM | Required for AI chat |
+| `LLM_BASE_URL` | AI Steward | Base URL for LLM provider | `https://openrouter.ai/api/v1` |
+| `LLM_MODEL` | AI Steward | Model identifier | `openai/gpt-4o-mini` |
+| `GRACE_WINDOW_HOURS` | Policy Engine | Permitted grace window duration | `72` |
+| `PARTIAL_PAYMENT_WINDOW_HOURS` | Policy Engine | Max window between split tranches | `48` |
+| `RATE_LIMIT_RPS` | Tatum RPC Queue | Requests per second limit | `3` |
+| `RATE_LIMIT_MAX_RETRIES` | Tatum RPC Queue | Retry attempts on 429/timeouts | `3` |
+| `RATE_LIMIT_BACKOFF_MS` | Tatum RPC Queue | Base exponential backoff in ms | `1000` |
+| `RECALL_LIMIT` | Walrus Memory | Top-K recalled memories per query | `10` |
+| `REQUEST_TIMEOUT_MS` | All Integrations | HTTP fetch timeout in ms | `20000` |
+
+---
+
+## 7. Installation & Development
+
+### 1. Prerequisites
+* Node.js `v22.23.4+` or `v24.x`
+* Sui Wallet browser extension (Sui Wallet, Suiet, or Nightly configured for Sui Testnet)
+
+### 2. Install Dependencies
 ```bash
-# 1. Install dependencies
 npm install
+```
 
-# 2. Configure environment variables
-cp .env.example .env
-
-# 3. Run full automated test suite (58 tests covering lifecycle, auth, Tatum, Walrus, Move)
+### 3. Run Automated Test Suite
+Runs all 58 automated unit, contract, and integration tests:
+```bash
 npm test
+```
 
-# 4. Build frontend application for production
-npx vite build
+### 4. Build for Production
+```bash
+npm run build
+```
 
-# 5. Run read-only Walrus Mainnet inventory (never writes or deletes)
-npm run inventory:walrus
-
-# 6. Restore / re-index a registered circle namespace from Walrus Mainnet
-npm run restore:walrus -- <circle-id> 15
-
-# 7. Start the development server (Express backend + Vite HMR)
+### 5. Start Development Server
+Starts the Express API server and Vite HMR frontend:
+```bash
 npm run dev
+```
+
+### 6. Read-Only Walrus Mainnet Inventory
+Inspects all recorded memories without modifying state:
+```bash
+npm run inventory:walrus -- <circleId>
 ```
 
 ---
 
-## License & Credits
+## 8. License & Acknowledgements
 
-Built on [Sui Network](https://sui.io), [Tatum Gateway](https://tatum.io), and [Walrus Protocol](https://walrus.xyz).
-Designed with non-custodial rotating credit and savings traditions (Ajo, Esusu, Tanda, Pardna, Chit Fund, Hui).
+* **License:** Apache 2.0
+* Built with [Sui Network](https://sui.io) Move smart contracts, [Tatum Gateway](https://tatum.io) blockchain indexing, [Walrus Protocol](https://walrus.xyz) decentralized memory, and [React](https://react.dev).
