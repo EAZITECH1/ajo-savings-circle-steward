@@ -529,9 +529,9 @@ router.post('/sui/verify-contribution', async (req, res) => {
           const splitRec = await persistSplitCompletionToWalrus({
             circleId: circle.circleId,
             cycle,
-            memberAddress: member.address,
-            memberId: member.id,
-            requiredAmount: circle.contributionPerMember,
+            memberAddress: targetMember.address,
+            memberId: targetMember.id,
+            requiredAmount: resolvedExpectedAmount,
             txDigests: result.txDigests,
           })
           splitCompletion = { recorded: true, durableWalrusConfirmed: true, walrusBlobId: splitRec.walrusBlobId }
@@ -544,8 +544,8 @@ router.post('/sui/verify-contribution', async (req, res) => {
           const remRec = await persistReminderConversionToWalrus({
             circleId: circle.circleId,
             cycle,
-            memberAddress: member.address,
-            memberId: member.id,
+            memberAddress: targetMember.address,
+            memberId: targetMember.id,
             txDigest: result.txDigest,
             reminderPreferenceBlobId: result.policy.reminderPreference.walrusBlobId,
             reminderPreferenceTitle: result.policy.reminderPreference.title,
@@ -572,15 +572,15 @@ router.post('/sui/verify-contribution', async (req, res) => {
         recipientAddresses: (circle.members || []).map((m) => m.address),
         type: isLate ? 'contribution_late' : 'contribution_verified',
         title: isLate
-          ? `Late Contribution Verified — ${member.name} (Cycle ${cycle})`
-          : `Contribution Verified — ${member.name} (Cycle ${cycle})`,
-        message: `${member.name}'s Cycle ${cycle} contribution (${result.amountReceived} ${circle.tokenType?.split('::').pop() || 'SUI'}) was verified on Sui${isLate ? ' (after cycle deadline)' : ''}.`,
+          ? `Late Contribution Verified — ${targetMember.name} (Cycle ${cycle})`
+          : `Contribution Verified — ${targetMember.name} (Cycle ${cycle})`,
+        message: `${targetMember.name}'s Cycle ${cycle} contribution (${result.amountReceived} ${circle.tokenType?.split('::').pop() || 'SUI'}) was verified on Sui${isLate ? ' (after cycle deadline)' : ''}.`,
         severity: isLate ? 'warning' : 'success',
         actionTab: 'overview',
         txDigest: result.txDigest,
         walrusBlobId: historicalLateness?.walrusBlobId || splitCompletion?.walrusBlobId,
         cycle,
-        dedupeKey: `verif-${circle.circleId}-c${cycle}-${member.id}-${result.status}`,
+        dedupeKey: `verif-${circle.circleId}-c${cycle}-${targetMember.id}-${result.status}`,
       })
     }
 
