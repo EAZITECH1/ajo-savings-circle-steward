@@ -17,6 +17,7 @@ import tatumRoutes from './routes/tatum.mjs'
 import memoryRoutes from './routes/memory.mjs'
 import stewardRoutes from './routes/steward.mjs'
 import ajoRoutes from './routes/ajo.mjs'
+import notificationsRoutes from './routes/notifications.mjs'
 import { credentialGuard } from './credential-guard.mjs'
 import { loadDotEnvIfPresent, loadConfig } from './config.mjs'
 
@@ -77,6 +78,7 @@ app.use('/api/tatum', tatumRoutes)
 app.use('/api/memory', memoryRoutes)
 app.use('/api/steward', stewardRoutes)
 app.use('/api/ajo', ajoRoutes)
+app.use('/api/notifications', notificationsRoutes)
 
 const server = createHttpServer(app)
 

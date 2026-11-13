@@ -31,6 +31,7 @@ import {
   UserCheck,
   Compass,
   LayoutDashboard,
+  Bell,
 } from 'lucide-react'
 import { normalizeSuiAddress } from '@mysten/sui/utils'
 import {
@@ -50,6 +51,12 @@ import {
   WalrusRestoreOutcome,
 } from './services/types'
 import { WalrusMemoryStore, ConfirmationChallengeResponse } from './services/memoryStore'
+import {
+  CircleNotification,
+  fetchNotifications,
+  markNotificationAsRead,
+  markAllNotificationsAsRead,
+} from './services/notifications'
 import {
   SuiChainVerifier,
   ExtendedVerificationResult,
@@ -213,10 +220,31 @@ function getSavedCircleId(): string {
   }
 }
 
+function formatMoveAbortError(rawMessage?: string): string {
+  const msg = String(rawMessage || 'Transaction failed.')
+  const abortMatch = msg.match(/abort code:\s*(\d+)/i) || msg.match(/MoveAbort.*?,\s*(\d+)\)/i)
+  if (!abortMatch) return msg
+  const code = Number(abortMatch[1])
+  const explanations: Record<number, string> = {
+    6: 'Your connected wallet is not a registered member of this circle (E_NOT_MEMBER = 6).',
+    7: 'Your wallet has already accepted this circle (E_ALREADY_ACCEPTED = 7).',
+    9: 'This circle vault is not currently in an active state (E_NOT_ACTIVE = 9).',
+    10: 'The cycle deadline has passed on this legacy vault contract (E_CYCLE_DEADLINE_PASSED = 10).',
+    11: 'Your contribution for the active on-chain cycle is already fully paid (E_ALREADY_FULLY_PAID = 11). If all members have paid, the scheduled recipient must claim the current cycle pot so the contract advances to the next cycle.',
+    12: 'Deposit amount exceeds your remaining owed contribution for this cycle (E_EXCEEDS_OWED = 12).',
+    13: 'Before the cycle deadline, 100% of member contributions must be deposited before the pot can be claimed (E_CYCLE_NOT_FULLY_FUNDED = 13).',
+    14: 'Only the scheduled recipient for the active on-chain cycle can execute claim_cycle (E_NOT_SCHEDULED_RECIPIENT = 14). Switch to the scheduled recipient wallet for the current on-chain cycle.',
+    15: 'There are currently no claimable funds in the circle vault (E_NO_CLAIMABLE_FUNDS = 15).',
+  }
+  return explanations[code] ? `${explanations[code]} [Raw: ${msg}]` : msg
+}
+
 function getExecutedTransactionDigest(result: any): string {
   if (result?.$kind === 'FailedTransaction') {
     throw new Error(
-      result.FailedTransaction.status.error?.message || 'The transaction failed on Sui.'
+      formatMoveAbortError(
+        result.FailedTransaction.status.error?.message || 'The transaction failed on Sui.'
+      )
     )
   }
   const digest = result?.digest || result?.Transaction?.digest || result?.effects?.transactionDigest
@@ -427,6 +455,12 @@ export default function App() {
   const [proposedMemory, setProposedMemory] = useState<ProposedMemory | null>(null)
   const [activeProposalChallenge, setActiveProposalChallenge] =
     useState<ConfirmationChallengeResponse | null>(null)
+  const [circleProposals, setCircleProposals] = useState<ProposedMemory[]>([])
+  const [rejectionReasons, setRejectionReasons] = useState<Record<string, string>>({})
+  const [notifications, setNotifications] = useState<CircleNotification[]>([])
+  const [unreadNotificationsCount, setUnreadNotificationsCount] = useState<number>(0)
+  const [showNotificationsDropdown, setShowNotificationsDropdown] = useState<boolean>(false)
+  const notificationsDropdownRef = useRef<HTMLDivElement | null>(null)
 
   // Wallet authentication state (authenticated Sui address and session)
   const [authenticatedWallet, setAuthenticatedWallet] = useState<string | null>(null)
@@ -666,6 +700,9 @@ export default function App() {
         setOnchainState(state)
         if (state.found) {
           if (state.currentCycle) setSelectedCycle(state.currentCycle)
+          if (state.cycleDeadlineMs && state.cycleDeadlineMs > 0) {
+            setWindowEnd(new Date(state.cycleDeadlineMs).toISOString())
+          }
           if (state.name && !circleName) setCircleName(state.name)
           if (state.coinType && !tokenType) setTokenType(state.coinType)
         }
@@ -789,14 +826,49 @@ export default function App() {
     setMemoryError(null)
     try {
       memoryStore.setCircleId(cid)
-      const records = await memoryStore.list()
+      const [records, proposals, notifData] = await Promise.all([
+        memoryStore.list(),
+        memoryStore.listProposals(cid).catch(() => []),
+        fetchNotifications(cid).catch(() => ({ notifications: [], unreadCount: 0 })),
+      ])
       setMemoriesList(records)
+      setCircleProposals(proposals)
+      setNotifications(notifData.notifications)
+      setUnreadNotificationsCount(notifData.unreadCount)
     } catch (err: any) {
       setMemoryError(err.message || 'Failed to recall memories from Walrus')
     } finally {
       setIsMemoryLoading(false)
     }
   }, [circleId])
+
+  const isConnectedOrganizer = useMemo(() => {
+    if (!currentAccount?.address || members.length === 0) return false
+    return normalizeSuiAddress(currentAccount.address) === normalizeSuiAddress(members[0].address)
+  }, [currentAccount?.address, members])
+
+  const refreshNotificationsOnly = useCallback(async () => {
+    if (!authenticatedWallet) return
+    const data = await fetchNotifications(circleId || undefined).catch(() => ({
+      notifications: [],
+      unreadCount: 0,
+    }))
+    setNotifications(data.notifications)
+    setUnreadNotificationsCount(data.unreadCount)
+    if (circleId) {
+      const props = await memoryStore.listProposals(circleId).catch(() => [])
+      setCircleProposals(props)
+    }
+  }, [authenticatedWallet, circleId])
+
+  useEffect(() => {
+    if (!authenticatedWallet) return
+    void refreshNotificationsOnly()
+    const timer = setInterval(() => {
+      void refreshNotificationsOnly()
+    }, 15000)
+    return () => clearInterval(timer)
+  }, [authenticatedWallet, refreshNotificationsOnly])
 
   useEffect(() => {
     if (circleId && memwalHealth.configured && authenticatedWallet) {
@@ -1427,13 +1499,16 @@ export default function App() {
           }
 
           if (poolAddress) refreshOnchainCircle(poolAddress)
+          void refreshNotificationsOnly()
         } catch (err: any) {
           setTxModal((prev) => ({
             ...prev,
             isSubmitting: false,
             isVerifying: false,
             verificationPending: false,
-            errorMessage: err?.message || 'Transaction signing was rejected or failed.',
+            errorMessage: formatMoveAbortError(
+              err?.message || 'Transaction signing was rejected or failed.'
+            ),
           }))
         }
       },
@@ -1518,11 +1593,14 @@ export default function App() {
           }
 
           if (poolAddress) refreshOnchainCircle(poolAddress)
+          void refreshNotificationsOnly()
         } catch (err: any) {
           setTxModal((prev) => ({
             ...prev,
             isSubmitting: false,
-            errorMessage: err?.message || 'Claim transaction failed or was rejected.',
+            errorMessage: formatMoveAbortError(
+              err?.message || 'Claim transaction failed or was rejected.'
+            ),
           }))
         }
       },
@@ -1758,10 +1836,25 @@ export default function App() {
     }
   }
 
-  // Reject proposed memory
-  const handleRejectMemory = () => {
-    setProposedMemory(null)
-    setActiveProposalChallenge(null)
+  // Reject proposed memory (organizer server rejection or local cancel)
+  const handleRejectMemory = async (targetProposalId?: string, reason?: string) => {
+    const pid = targetProposalId || proposedMemory?.id
+    if (pid && circleId && isConnectedOrganizer) {
+      try {
+        await memoryStore.rejectProposal({
+          circleId,
+          proposalId: pid,
+          reason: reason || rejectionReasons[pid] || 'Rejected by circle organizer',
+        })
+        await refreshMemories(circleId)
+      } catch (err: any) {
+        setMemoryError(err.message || 'Failed to reject proposal')
+      }
+    }
+    if (!targetProposalId || targetProposalId === proposedMemory?.id) {
+      setProposedMemory(null)
+      setActiveProposalChallenge(null)
+    }
   }
 
   // Verify a specific member's captured transaction digest
@@ -2040,6 +2133,7 @@ export default function App() {
       setManualTitle('')
       setManualQuote('')
       setManualRule('')
+      void refreshNotificationsOnly()
     } catch (err: any) {
       setMemoryError(err.message || 'Failed to propose memory')
     }
@@ -2686,8 +2780,122 @@ export default function App() {
             })}
           </nav>
 
-          {/* Header Controls: Single Clean "Connect Wallet" Action (Slush & Wallet Standard) */}
+          {/* Header Controls: Notifications + Single Clean "Connect Wallet" Action */}
           <div className="flex items-center gap-sm shrink-0">
+            {currentAccount && (
+              <div className="relative" ref={notificationsDropdownRef}>
+                <button
+                  type="button"
+                  onClick={() => setShowNotificationsDropdown((prev) => !prev)}
+                  aria-label="Circle notifications"
+                  className="relative inline-flex items-center justify-center rounded-lg border border-secondary bg-primary p-sm text-secondary hover:bg-secondary hover:text-primary transition-colors shadow-xs"
+                >
+                  <Bell className="size-4 shrink-0" />
+                  {unreadNotificationsCount > 0 && (
+                    <span className="absolute -top-1 -right-1 inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-full bg-error-solid text-[10px] font-bold text-fg-white">
+                      {unreadNotificationsCount > 9 ? '9+' : unreadNotificationsCount}
+                    </span>
+                  )}
+                </button>
+
+                {showNotificationsDropdown && (
+                  <div className="absolute right-0 mt-xs w-80 sm:w-96 rounded-xl border border-secondary bg-primary shadow-lg z-50 overflow-hidden">
+                    <div className="flex items-center justify-between px-lg py-md border-b border-secondary bg-secondary/40">
+                      <div className="flex items-center gap-xs">
+                        <Bell className="size-4 text-fg-brand-primary" />
+                        <span className="text-xs font-semibold text-primary">
+                          Circle Notifications
+                        </span>
+                        {unreadNotificationsCount > 0 && (
+                          <span className="rounded-full bg-utility-brand-50 border border-utility-brand-200 px-2 py-0.5 text-[10px] font-semibold text-brand-primary">
+                            {unreadNotificationsCount} unread
+                          </span>
+                        )}
+                      </div>
+                      {notifications.length > 0 && (
+                        <button
+                          type="button"
+                          onClick={async () => {
+                            await markAllNotificationsAsRead(circleId || undefined)
+                            await refreshNotificationsOnly()
+                          }}
+                          className="text-[11px] font-medium text-brand-primary hover:underline"
+                        >
+                          Mark all read
+                        </button>
+                      )}
+                    </div>
+
+                    <div className="max-h-96 overflow-y-auto divide-y divide-secondary">
+                      {notifications.length === 0 ? (
+                        <div className="p-xl text-center text-xs text-tertiary">
+                          No notifications for your active circles right now.
+                        </div>
+                      ) : (
+                        notifications.map((notif) => (
+                          <div
+                            key={notif.id}
+                            className={`p-md space-y-xs transition-colors ${
+                              notif.read ? 'bg-primary' : 'bg-utility-brand-50/40'
+                            }`}
+                          >
+                            <div className="flex items-start justify-between gap-xs">
+                              <span className="text-xs font-semibold text-primary">
+                                {notif.title}
+                              </span>
+                              {!notif.read && (
+                                <span className="w-2 h-2 rounded-full bg-brand-solid shrink-0 mt-1" />
+                              )}
+                            </div>
+                            <p className="text-xs text-secondary leading-relaxed">
+                              {notif.message}
+                            </p>
+                            <div className="flex items-center justify-between pt-xxs">
+                              <span className="text-[10px] text-tertiary">
+                                {notif.circleName}
+                              </span>
+                              <div className="flex items-center gap-sm">
+                                {notif.actionTab && (
+                                  <button
+                                    type="button"
+                                    onClick={async () => {
+                                      await markNotificationAsRead(notif.id)
+                                      await refreshNotificationsOnly()
+                                      setShowNotificationsDropdown(false)
+                                      const tab =
+                                        notif.actionTab === 'overview'
+                                          ? 'dashboard'
+                                          : (notif.actionTab as TabId)
+                                      setActiveTab(tab)
+                                      window.location.hash = tab
+                                    }}
+                                    className="text-[11px] font-semibold text-brand-primary hover:underline"
+                                  >
+                                    View →
+                                  </button>
+                                )}
+                                {!notif.read && (
+                                  <button
+                                    type="button"
+                                    onClick={async () => {
+                                      await markNotificationAsRead(notif.id)
+                                      await refreshNotificationsOnly()
+                                    }}
+                                    className="text-[11px] text-tertiary hover:text-primary"
+                                  >
+                                    Dismiss
+                                  </button>
+                                )}
+                              </div>
+                            </div>
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
             {currentAccount ? (
               <div className="relative" ref={accountDropdownRef}>
                 <button
@@ -3396,6 +3604,26 @@ export default function App() {
                           }}
                         />
                       </div>
+                      {potPerCycle > 0 &&
+                        totalOnchainPotReceived >= potPerCycle &&
+                        !isCycleClaimed(selectedCycle) && (
+                          <div className="p-md rounded-lg bg-utility-success-50 border border-utility-success-200 text-xs text-utility-success-700 flex items-center justify-between gap-sm flex-wrap">
+                            <span>
+                              <strong>All Cycle {selectedCycle} contributions complete!</strong>{' '}
+                              {scheduledRecipient?.name || 'The scheduled recipient'} can now claim the{' '}
+                              {potPerCycle.toLocaleString()} {tokenSymbol} pot to automatically advance the vault to Cycle{' '}
+                              {selectedCycle + 1 <= totalCycles ? selectedCycle + 1 : selectedCycle}.
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => setActiveTab('payout')}
+                              className="inline-flex items-center gap-xxs rounded-md bg-utility-success-700 px-md py-xs text-xs font-semibold text-fg-white hover:opacity-90"
+                            >
+                              <span>Claim & Advance Cycle</span>
+                              <ArrowRight className="size-3.5" />
+                            </button>
+                          </div>
+                        )}
                     </div>
 
                     {scheduledRecipient && (
@@ -4846,6 +5074,105 @@ export default function App() {
                 </div>
               </section>
 
+              {/* Pending & Recent Agreement Proposals Card (Organizer Sign / Reject) */}
+              <section className="rounded-xl border border-secondary bg-primary p-xl shadow-xs space-y-md">
+                <div className="flex items-center justify-between">
+                  <h3 className="text-sm font-semibold text-primary">Proposed Agreements</h3>
+                  <span className="text-xs text-tertiary">
+                    {circleProposals.filter((p) => p.status === 'pending').length} pending
+                  </span>
+                </div>
+                {circleProposals.length === 0 ? (
+                  <p className="text-xs text-tertiary leading-relaxed">
+                    No pending or rejected agreement proposals for this circle. Members can propose agreements from the Walrus Memory tab; non-organizer proposals appear here for the organizer to sign or reject.
+                  </p>
+                ) : (
+                  <div className="space-y-sm max-h-80 overflow-y-auto">
+                    {circleProposals.map((prop) => {
+                      const isPending = prop.status === 'pending'
+                      const isRejected = prop.status === 'rejected'
+                      const needsOrg = Boolean(prop.requiresOrganizerApproval)
+                      return (
+                        <div
+                          key={prop.id}
+                          className={`p-md rounded-lg border text-xs space-y-xs ${
+                            isRejected
+                              ? 'bg-utility-error-50 border-utility-error-200'
+                              : 'bg-utility-brand-50/50 border-utility-brand-200'
+                          }`}
+                        >
+                          <div className="flex items-center justify-between gap-xs">
+                            <span className="font-semibold text-primary">{prop.title}</span>
+                            <span
+                              className={`px-2 py-0.5 rounded-full text-[10px] font-semibold ${
+                                isRejected
+                                  ? 'bg-utility-error-100 text-utility-error-700'
+                                  : 'bg-utility-warning-100 text-utility-warning-700'
+                              }`}
+                            >
+                              {isRejected
+                                ? 'Rejected'
+                                : needsOrg
+                                ? 'Needs Organizer Signature'
+                                : 'Pending Signature'}
+                            </span>
+                          </div>
+                          <p className="italic text-secondary">"{prop.quote}"</p>
+                          {prop.proposedBy && (
+                            <p className="text-[11px] text-tertiary">
+                              Proposed by: {prop.proposedBy}
+                            </p>
+                          )}
+                          {isRejected && prop.rejectionReason && (
+                            <p className="text-[11px] font-medium text-utility-error-700">
+                              Reason: {prop.rejectionReason}
+                            </p>
+                          )}
+                          {isPending && isConnectedOrganizer && (
+                            <div className="pt-xs space-y-xs">
+                              <input
+                                type="text"
+                                value={rejectionReasons[prop.id] || ''}
+                                onChange={(e) =>
+                                  setRejectionReasons((prev) => ({
+                                    ...prev,
+                                    [prop.id]: e.target.value,
+                                  }))
+                                }
+                                placeholder="Optional rejection reason..."
+                                className="w-full rounded-md bg-primary px-sm py-xs text-xs text-primary border border-secondary"
+                              />
+                              <div className="flex items-center gap-xs">
+                                <button
+                                  type="button"
+                                  disabled={isMemoryWriting}
+                                  onClick={() => handleConfirmMemoryWithWallet(prop)}
+                                  className="inline-flex items-center gap-xxs rounded-md bg-brand-solid px-md py-xs text-xs font-semibold text-primary-on-brand hover:bg-brand-solid-hover disabled:opacity-50"
+                                >
+                                  <Lock className="size-3" />
+                                  <span>Sign & Write to Walrus</span>
+                                </button>
+                                <button
+                                  type="button"
+                                  disabled={isMemoryWriting}
+                                  onClick={() =>
+                                    handleRejectMemory(prop.id, rejectionReasons[prop.id])
+                                  }
+                                  className="inline-flex items-center gap-xxs rounded-md bg-utility-error-50 border border-utility-error-200 px-md py-xs text-xs font-semibold text-utility-error-700 hover:bg-utility-error-100 disabled:opacity-50"
+                                >
+                                  <X className="size-3" />
+                                  <span>Reject</span>
+                                </button>
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      )
+                    })}
+                  </div>
+                )}
+              </section>
+
               {/* Suggested Questions Card */}
               <section className="rounded-xl border border-secondary bg-primary p-xl shadow-xs space-y-sm">
                 <h3 className="text-sm font-semibold text-primary">Suggested Inquiries</h3>
@@ -5132,10 +5459,18 @@ export default function App() {
                             {connectedMember.name} ({connectedMember.address.slice(0, 6)}...{connectedMember.address.slice(-4)})
                           </span>
                         </div>
-                        {proposedMemory.memberId && proposedMemory.memberId !== connectedMember.id && (
+                        {proposedMemory.requiresOrganizerApproval && !isConnectedOrganizer ? (
                           <div className="p-xs rounded-md bg-utility-warning-50 border border-utility-warning-200 text-utility-warning-700 text-xs mt-xxs">
-                            ⚠️ This proposal specifically pertains to {members.find((m) => m.id === proposedMemory.memberId)?.name || proposedMemory.memberId}. Only their wallet can sign it.
+                            ⏳ Since you are not the circle organizer, this agreement proposal has been sent to the organizer's Steward Chat page for signature before writing to Walrus. You will receive a notification once the organizer signs or rejects it.
                           </div>
+                        ) : (
+                          proposedMemory.memberId &&
+                          proposedMemory.memberId !== connectedMember.id &&
+                          !isConnectedOrganizer && (
+                            <div className="p-xs rounded-md bg-utility-warning-50 border border-utility-warning-200 text-utility-warning-700 text-xs mt-xxs">
+                              ⚠️ This proposal specifically pertains to {members.find((m) => m.id === proposedMemory.memberId)?.name || proposedMemory.memberId}. Only their wallet or the circle organizer can sign it.
+                            </div>
+                          )
                         )}
                       </div>
                     ) : currentAccount?.address ? (
@@ -5162,7 +5497,13 @@ export default function App() {
                           isMemoryWriting ||
                           !memwalHealth.configured ||
                           Boolean(currentAccount && !connectedMember) ||
-                          Boolean(proposedMemory.memberId && connectedMember && proposedMemory.memberId !== connectedMember.id)
+                          Boolean(proposedMemory.requiresOrganizerApproval && !isConnectedOrganizer) ||
+                          Boolean(
+                            !proposedMemory.requiresOrganizerApproval &&
+                              proposedMemory.memberId &&
+                              connectedMember &&
+                              proposedMemory.memberId !== connectedMember.id
+                          )
                         }
                         className="inline-flex items-center gap-xs rounded-lg bg-brand-solid px-xl py-md text-xs font-semibold text-primary-on-brand shadow-xs disabled:opacity-50 hover:bg-brand-solid-hover"
                       >
@@ -5174,7 +5515,11 @@ export default function App() {
                             ? 'Connect Wallet to Sign Memory'
                             : !connectedMember
                             ? 'Wallet Not Registered'
-                            : proposedMemory.memberId && proposedMemory.memberId !== connectedMember.id
+                            : proposedMemory.requiresOrganizerApproval && !isConnectedOrganizer
+                            ? 'Awaiting Organizer Signature in Chat'
+                            : !proposedMemory.requiresOrganizerApproval &&
+                              proposedMemory.memberId &&
+                              proposedMemory.memberId !== connectedMember.id
                             ? 'Not Your Proposal to Sign'
                             : 'Sign with Wallet & Write to Walrus'}
                         </span>

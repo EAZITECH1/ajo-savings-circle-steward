@@ -6,7 +6,10 @@ import {
   listCircleRosters,
   verifyCircleMembership,
   proposeCircleMemory,
+  rejectCircleProposal,
   getPendingProposals,
+  getCircleProposals,
+  getProposalById,
   issueConfirmationChallenge,
   confirmAndWriteMemory,
   persistCircleConfigToWalrus,
@@ -16,6 +19,7 @@ import {
   restoreCircleFromWalrus,
 } from '../walrus-memory.mjs'
 import { requireWalletSession, WalletAuthError } from '../wallet-auth.mjs'
+import { addNotification } from '../notifications.mjs'
 
 const router = Router()
 
@@ -126,7 +130,11 @@ router.get('/circles/:circleId', (req, res) => {
     const { circle } = verifyCircleMembership(req.params.circleId, {
       memberAddress: session.walletAddress,
     })
-    res.json({ circle, pendingProposals: getPendingProposals(circle.circleId) })
+    res.json({
+      circle,
+      pendingProposals: getPendingProposals(circle.circleId),
+      proposals: getCircleProposals(circle.circleId),
+    })
   } catch (err) {
     res.status(mapErrorStatus(err, 403)).json({ error: err.message })
   }
@@ -136,13 +144,59 @@ router.post('/propose', (req, res) => {
   try {
     const session = requireWalletSession(req)
     const body = req.body || {}
-    const { member } = verifyCircleMembership(body.circleId, {
+    const { circle, member } = verifyCircleMembership(body.circleId, {
       memberAddress: session.walletAddress,
     })
     const proposal = proposeCircleMemory({
       ...body,
       proposedBy: `${member.name} (${session.walletAddress})`,
+      proposedByAddress: session.walletAddress,
+      proposedByMemberId: member.id,
     })
+    if (proposal.requiresOrganizerApproval && circle.organizerAddress) {
+      addNotification({
+        circleId: circle.circleId,
+        circleName: circle.circleName,
+        recipientAddresses: [circle.organizerAddress],
+        type: 'proposal_pending_organizer',
+        title: `Agreement Proposal Needs Your Signature`,
+        message: `${member.name} proposed "${proposal.title}" in ${circle.circleName || circle.circleId}. Review and sign or reject it in Steward Chat.`,
+        severity: 'warning',
+        actionTab: 'chat',
+        proposalId: proposal.id,
+        cycle: proposal.cycle,
+      })
+    }
+    res.json({ proposal })
+  } catch (err) {
+    res.status(mapErrorStatus(err, 400)).json({ error: err.message })
+  }
+})
+
+router.post('/reject', (req, res) => {
+  try {
+    const session = requireWalletSession(req)
+    const { circleId, proposalId, reason } = req.body || {}
+    const { proposal, circle, organizer } = rejectCircleProposal({
+      circleId,
+      proposalId,
+      organizerAddress: session.walletAddress,
+      reason,
+    })
+    if (proposal.proposedByAddress) {
+      addNotification({
+        circleId: circle.circleId,
+        circleName: circle.circleName,
+        recipientAddresses: [proposal.proposedByAddress],
+        type: 'proposal_rejected',
+        title: `Agreement Proposal Rejected`,
+        message: `${organizer.name} (organizer) rejected "${proposal.title}"${proposal.rejectionReason ? `: ${proposal.rejectionReason}` : '.'}`,
+        severity: 'error',
+        actionTab: 'chat',
+        proposalId: proposal.id,
+        cycle: proposal.cycle,
+      })
+    }
     res.json({ proposal })
   } catch (err) {
     res.status(mapErrorStatus(err, 400)).json({ error: err.message })
@@ -187,11 +241,28 @@ router.post('/confirm', async (req, res) => {
         error: `Authorization mismatch: Connected wallet (${session.walletAddress}) belongs to ${member.name} (${member.id}), but the request attempted to confirm on behalf of member ID "${body.memberId}". Member impersonation is strictly forbidden.`,
       })
     }
+    const preConfirmProposal = body.proposalId ? getProposalById(body.proposalId) : null
     const record = await confirmAndWriteMemory({
       ...body,
       memberId: member.id,
       memberAddress: session.walletAddress,
     })
+    if (preConfirmProposal?.proposedByAddress && preConfirmProposal.requiresOrganizerApproval) {
+      const circle = getCircleRoster(body.circleId)
+      addNotification({
+        circleId: body.circleId,
+        circleName: circle?.circleName,
+        recipientAddresses: [preConfirmProposal.proposedByAddress],
+        type: 'proposal_approved',
+        title: `Agreement Approved & Written to Walrus`,
+        message: `${member.name} (organizer) signed "${record.title}" and committed it to Walrus Memory.`,
+        severity: 'success',
+        actionTab: 'chat',
+        proposalId: preConfirmProposal.id,
+        walrusBlobId: record.walrusBlobId,
+        cycle: record.cycle,
+      })
+    }
     res.json({ record })
   } catch (err) {
     res.status(mapErrorStatus(err, 400)).json({ error: err.message })

@@ -8,6 +8,7 @@ import {
   upsertCircleRoster,
   verifyCircleMembership,
   proposeCircleMemory,
+  rejectCircleProposal,
   issueConfirmationChallenge,
   confirmAndWriteMemory,
   persistHistoricalLatenessToWalrus,
@@ -503,4 +504,111 @@ test('Walrus Memory: persistHistoricalLatenessToWalrus records grace resolution 
 
   const sessionRecords = getSessionConfirmedCircleMemories(circleId, testEnv)
   assert.ok(sessionRecords.some((r) => r.walrusBlobId === 'mock_blob_grace_honored_c2'))
+})
+
+test('Organizer approval & notifications: non-organizer agreement requires organizer signature or rejection and synthesizes overdue reminders', async () => {
+  const { listNotificationsForUser, addNotification } = await import('../server/notifications.mjs')
+  const kpOrg = new Ed25519Keypair()
+  const kpMem = new Ed25519Keypair()
+  const orgAddr = kpOrg.getPublicKey().toSuiAddress()
+  const memAddr = kpMem.getPublicKey().toSuiAddress()
+  const circleId = 'test-circle-org-approval'
+
+  upsertCircleRoster(
+    {
+      circleId,
+      circleName: 'Organizer Approval Circle',
+      poolAddress: '0xcccc',
+      contributionPerMember: 10,
+      tokenType: '0x2::sui::SUI',
+      cycleLength: 'Daily',
+      currentCycle: 1,
+      windowEnd: '2026-01-01T00:00:00Z', // past deadline -> overdue
+      members: [
+        { id: 'm1', name: 'Organizer', address: orgAddr },
+        { id: 'm2', name: 'MemberTwo', address: memAddr },
+      ],
+    },
+    { authenticatedWalletAddress: orgAddr }
+  )
+
+  const prop = proposeCircleMemory({
+    circleId,
+    category: 'Agreements',
+    title: '10 Minutes Grace Window for MemberTwo',
+    quote: 'MemberTwo requests 10m grace.',
+    memberId: 'm2',
+    cycle: 1,
+    proposedBy: `MemberTwo (${memAddr})`,
+    proposedByAddress: memAddr,
+    proposedByMemberId: 'm2',
+  })
+
+  assert.equal(prop.requiresOrganizerApproval, true)
+
+  // Non-organizer proposer cannot sign their own Agreement proposal when requiresOrganizerApproval is true
+  assert.throws(
+    () =>
+      issueConfirmationChallenge({
+        circleId,
+        proposalId: prop.id,
+        memberId: 'm2',
+        memberAddress: memAddr,
+      }),
+    /requires the circle organizer's wallet/i
+  )
+
+  // Organizer CAN issue challenge for it
+  const challenge = issueConfirmationChallenge({
+    circleId,
+    proposalId: prop.id,
+    memberId: 'm1',
+    memberAddress: orgAddr,
+  })
+  assert.equal(challenge.proposalId, prop.id)
+
+  // Non-organizer cannot reject; organizer can reject a second proposal
+  const prop2 = proposeCircleMemory({
+    circleId,
+    category: 'Agreements',
+    title: 'Second Proposal to Reject',
+    quote: 'Requesting swap.',
+    memberId: 'm2',
+    cycle: 1,
+    proposedByAddress: memAddr,
+    proposedByMemberId: 'm2',
+  })
+  assert.throws(
+    () =>
+      rejectCircleProposal({
+        circleId,
+        proposalId: prop2.id,
+        organizerAddress: memAddr,
+        reason: 'Trying as non-organizer',
+      }),
+    /Only the circle organizer can reject/i
+  )
+
+  const rejected = rejectCircleProposal({
+    circleId,
+    proposalId: prop2.id,
+    organizerAddress: orgAddr,
+    reason: 'Cycle 1 deadline already passed',
+  })
+  assert.equal(rejected.proposal.status, 'rejected')
+  assert.equal(rejected.proposal.rejectionReason, 'Cycle 1 deadline already passed')
+
+  addNotification({
+    circleId,
+    circleName: 'Organizer Approval Circle',
+    recipientAddresses: [memAddr],
+    type: 'proposal_rejected',
+    title: 'Agreement Proposal Rejected',
+    message: 'Organizer rejected Second Proposal to Reject: Cycle 1 deadline already passed',
+    severity: 'error',
+  })
+
+  const memNotifs = listNotificationsForUser({ walletAddress: memAddr, circleId })
+  assert.ok(memNotifs.some((n) => n.type === 'proposal_rejected'))
+  assert.ok(memNotifs.some((n) => n.type === 'contribution_overdue'))
 })

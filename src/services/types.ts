@@ -186,6 +186,16 @@ export interface ProposedMemory {
   memberIds?: string[]
   cycle?: number
   txDigest?: string
+  proposedBy?: string
+  proposedByAddress?: string
+  proposedByMemberId?: string
+  requiresOrganizerApproval?: boolean
+  organizerAddress?: string
+  status?: 'pending' | 'confirmed' | 'rejected'
+  rejectedAt?: string
+  rejectedBy?: string
+  rejectionReason?: string
+  createdAt?: string
 }
 
 export interface StewardChatInput {

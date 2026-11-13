@@ -23,6 +23,7 @@ import {
 } from '../walrus-memory.mjs'
 import { requireWalletSession, WalletAuthError } from '../wallet-auth.mjs'
 import { loadConfig } from '../config.mjs'
+import { addNotification } from '../notifications.mjs'
 
 const router = Router()
 
@@ -563,6 +564,26 @@ router.post('/sui/verify-contribution', async (req, res) => {
       error: result.error,
       rawNotes: result.rawNotes,
     })
+    if (result.status === 'Verified' || result.status === 'Late') {
+      const isLate = result.status === 'Late'
+      addNotification({
+        circleId: circle.circleId,
+        circleName: circle.circleName,
+        recipientAddresses: (circle.members || []).map((m) => m.address),
+        type: isLate ? 'contribution_late' : 'contribution_verified',
+        title: isLate
+          ? `Late Contribution Verified — ${member.name} (Cycle ${cycle})`
+          : `Contribution Verified — ${member.name} (Cycle ${cycle})`,
+        message: `${member.name}'s Cycle ${cycle} contribution (${result.amountReceived} ${circle.tokenType?.split('::').pop() || 'SUI'}) was verified on Sui${isLate ? ' (after cycle deadline)' : ''}.`,
+        severity: isLate ? 'warning' : 'success',
+        actionTab: 'overview',
+        txDigest: result.txDigest,
+        walrusBlobId: historicalLateness?.walrusBlobId || splitCompletion?.walrusBlobId,
+        cycle,
+        dedupeKey: `verif-${circle.circleId}-c${cycle}-${member.id}-${result.status}`,
+      })
+    }
+
     res.json({ ...result, historicalLateness, splitCompletion, reminderConversion })
   } catch (err) {
     console.error('[VERIFY-ERR]', err)

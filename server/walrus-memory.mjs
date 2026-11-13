@@ -1145,15 +1145,28 @@ export function proposeCircleMemory(input) {
     cycle = 1,
     txDigest,
     proposedBy = 'steward',
+    proposedByAddress,
+    proposedByMemberId,
   } = input
 
   if (!circleId) throw new Error('circleId is required to propose a memory')
   assertCircleNotQuarantined(circleId)
   if (!title || !quote) throw new Error('title and quote are required to propose a memory')
 
+  const trimmedCircleId = String(circleId).trim()
+  const circle = getCircleRoster(trimmedCircleId)
+  const normProposer = proposedByAddress ? normalizeSuiAddress(proposedByAddress) : undefined
+  const normOrganizer = circle?.organizerAddress ? normalizeSuiAddress(circle.organizerAddress) : undefined
+  const isNonOrganizerAgreement = Boolean(
+    category === 'Agreements' &&
+      normProposer &&
+      normOrganizer &&
+      normProposer !== normOrganizer
+  )
+
   const draft = {
     id: `prop-${crypto.randomUUID()}`,
-    circleId: String(circleId).trim(),
+    circleId: trimmedCircleId,
     category,
     memoryType: memoryType || categoryToMemoryType(category),
     title: String(title).trim(),
@@ -1168,6 +1181,10 @@ export function proposeCircleMemory(input) {
     cycle: Number(cycle) || 1,
     txDigest: txDigest ? String(txDigest).trim() : undefined,
     proposedBy,
+    proposedByAddress: normProposer,
+    proposedByMemberId: proposedByMemberId ? String(proposedByMemberId).trim() : undefined,
+    requiresOrganizerApproval: isNonOrganizerAgreement,
+    organizerAddress: normOrganizer,
     status: 'pending',
     createdAt: new Date().toISOString(),
   }
@@ -1179,6 +1196,33 @@ export function proposeCircleMemory(input) {
 
   proposalsStore.set(proposal.id, proposal)
   return proposal
+}
+
+export function rejectCircleProposal({ circleId, proposalId, organizerAddress, reason }) {
+  if (!circleId || !proposalId) {
+    throw new WalletAuthError('circleId and proposalId are required to reject a proposal.', 400)
+  }
+  assertCircleNotQuarantined(circleId)
+  const { circle, member } = verifyCircleMembership(circleId, { memberAddress: organizerAddress })
+  const normCaller = normalizeSuiAddress(member.address)
+  const normOrg = circle.organizerAddress ? normalizeSuiAddress(circle.organizerAddress) : null
+  if (!normOrg || normCaller !== normOrg) {
+    throw new WalletAuthError('Only the circle organizer can reject agreement proposals.', 403)
+  }
+
+  const proposal = getProposalById(proposalId)
+  if (!proposal || proposal.circleId !== String(circleId).trim()) {
+    throw new WalletAuthError(`Proposal "${proposalId}" was not found for circle "${circleId}".`, 404)
+  }
+  if (proposal.status !== 'pending') {
+    throw new WalletAuthError(`Proposal "${proposalId}" was already ${proposal.status}.`, 409)
+  }
+
+  proposal.status = 'rejected'
+  proposal.rejectedAt = new Date().toISOString()
+  proposal.rejectedBy = `${member.name} (${normCaller})`
+  proposal.rejectionReason = reason ? String(reason).trim() : 'Rejected by circle organizer'
+  return { proposal, circle, organizer: member }
 }
 
 export function getPendingProposals(circleId) {
@@ -1212,7 +1256,7 @@ export function getCircleProposals(circleId, { status } = {}) {
  */
 export function issueConfirmationChallenge({ circleId, proposalId, memberId, memberAddress }) {
   assertCircleNotQuarantined(circleId)
-  const { member } = verifyCircleMembership(circleId, { memberId, memberAddress })
+  const { circle, member } = verifyCircleMembership(circleId, { memberId, memberAddress })
 
   if (!proposalId || typeof proposalId !== 'string') {
     throw new WalletAuthError('proposalId is required to issue a confirmation challenge.', 400)
@@ -1230,8 +1274,17 @@ export function issueConfirmationChallenge({ circleId, proposalId, memberId, mem
     )
   }
 
-  // Prevent member impersonation: if proposal is targeted at a specific member, only they can confirm
-  if (storedProposal.memberId && storedProposal.memberId !== member.id) {
+  const normCaller = normalizeSuiAddress(member.address)
+  const normOrganizer = circle.organizerAddress ? normalizeSuiAddress(circle.organizerAddress) : null
+  if (storedProposal.requiresOrganizerApproval) {
+    if (!normOrganizer || normCaller !== normOrganizer) {
+      throw new WalletAuthError(
+        `This agreement proposal was submitted by a member and requires the circle organizer's wallet (${circle.organizerAddress}) to sign before writing to Walrus.`,
+        403
+      )
+    }
+  } else if (storedProposal.memberId && storedProposal.memberId !== member.id) {
+    // Prevent member impersonation: if proposal is targeted at a specific member, only they can confirm
     throw new WalletAuthError(
       `Authorization mismatch: This agreement proposal specifically pertains to member ID "${storedProposal.memberId}", but the requesting wallet belongs to ${member.name} (${member.id}). Member impersonation is strictly forbidden.`,
       403
@@ -1335,9 +1388,17 @@ export async function confirmAndWriteMemory(input, env = process.env) {
     Boolean(publicKeyHex)
 
   let proposalToWrite = storedProposal || inlineProposal
+  const normOrganizer = circle.organizerAddress ? normalizeSuiAddress(circle.organizerAddress) : null
 
-  // Prevent member impersonation: if proposal is targeted at a specific member, only they can confirm
-  if (proposalToWrite?.memberId && proposalToWrite.memberId !== member.id) {
+  if (proposalToWrite?.requiresOrganizerApproval) {
+    if (!normOrganizer || normalizedMemberAddr !== normOrganizer) {
+      throw new WalletAuthError(
+        `This agreement proposal was submitted by a member and requires the circle organizer's signature (${circle.organizerAddress}) before writing to Walrus.`,
+        403
+      )
+    }
+  } else if (proposalToWrite?.memberId && proposalToWrite.memberId !== member.id) {
+    // Prevent member impersonation: if proposal is targeted at a specific member, only they can confirm
     throw new WalletAuthError(
       `Authorization mismatch: This agreement proposal specifically pertains to member ID "${proposalToWrite.memberId}", but the confirming wallet belongs to ${member.name} (${member.id}). Member impersonation is strictly forbidden.`,
       403
@@ -1432,7 +1493,9 @@ export async function confirmAndWriteMemory(input, env = process.env) {
     proposalToWrite = storedProposal
     verifiedProposalHash = challenge.proposalHash
     confirmationType = 'wallet_signature_verified'
-    confirmedByLabel = `Member-signed by ${member.name} (${normalizedMemberAddr}) — 1 wallet signature, not full group consensus`
+    confirmedByLabel = storedProposal?.requiresOrganizerApproval
+      ? `Organizer-approved & signed by ${member.name} (${normalizedMemberAddr})`
+      : `Member-signed by ${member.name} (${normalizedMemberAddr}) — 1 wallet signature, not full group consensus`
   } else {
     // Organizer-entered confirmation: only allowed if the confirming member is the registered circle organizer
     if (normalizedMemberAddr !== normalizeSuiAddress(circle.organizerAddress)) {

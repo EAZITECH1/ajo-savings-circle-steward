@@ -167,6 +167,44 @@ export class WalrusMemoryStore implements MemoryStore {
     return data.record
   }
 
+  async listProposals(circleId?: string): Promise<any[]> {
+    const cid = circleId || this.circleId
+    if (!cid) return []
+    const res = await fetch(`/api/memory/circles/${encodeURIComponent(cid)}`, {
+      headers: getAuthHeaders(),
+    })
+    if (!res.ok) return []
+    const data = await res.json().catch(() => ({}))
+    return Array.isArray(data.proposals)
+      ? data.proposals
+      : Array.isArray(data.pendingProposals)
+      ? data.pendingProposals
+      : []
+  }
+
+  async rejectProposal(params: {
+    circleId?: string
+    proposalId: string
+    reason?: string
+  }): Promise<any> {
+    const circleId = params.circleId || this.circleId
+    if (!circleId) throw new Error('No active circleId set for proposal rejection')
+    const res = await fetch('/api/memory/reject', {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify({
+        circleId,
+        proposalId: params.proposalId,
+        reason: params.reason,
+      }),
+    })
+    const data = await res.json()
+    if (!res.ok) {
+      throw new Error(data.error || `HTTP ${res.status}: Failed to reject proposal`)
+    }
+    return data.proposal
+  }
+
   /**
    * Write a confirmed memory record to Walrus Mainnet and wait for job completion.
    * Stages a server proposal first so a proposalId is always bound on the server.
