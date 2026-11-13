@@ -481,6 +481,8 @@ export default function App() {
   const [ajoConfig, setAjoConfig] = useState<AjoConfigResponse | null>(null)
   const [onchainState, setOnchainState] = useState<OnchainCircleState | null>(null)
   const [isOnchainLoading, setIsOnchainLoading] = useState<boolean>(false)
+  const backgroundChainSyncInFlight = useRef(false)
+  const [lastChainSyncAt, setLastChainSyncAt] = useState<number | null>(null)
   const [availableCircles, setAvailableCircles] = useState<any[]>([])
   const [selectedTokenSymbol, setSelectedTokenSymbol] = useState<'SUI' | 'USDC'>('SUI')
 
@@ -691,10 +693,10 @@ export default function App() {
   }, [tokenType])
 
   const refreshOnchainCircle = useCallback(
-    async (targetPoolAddress?: string) => {
+    async (targetPoolAddress?: string, options: { silent?: boolean } = {}) => {
       const pool = targetPoolAddress || poolAddress
       if (!pool || !pool.startsWith('0x')) return
-      setIsOnchainLoading(true)
+      if (!options.silent) setIsOnchainLoading(true)
       try {
         const state = await fetchOnchainCircle(pool)
         setOnchainState(state)
@@ -709,7 +711,7 @@ export default function App() {
       } catch (err: any) {
         console.warn('On-chain circle refresh note:', err.message)
       } finally {
-        setIsOnchainLoading(false)
+        if (!options.silent) setIsOnchainLoading(false)
       }
     },
     [poolAddress, circleName, tokenType]
@@ -927,7 +929,7 @@ export default function App() {
                   cycle: cyc,
                   txDigests: localDigests,
                   withMemory,
-                })
+                }, { maxRetries: 0 })
                 merged[recKey] = res
               } catch {
                 // Keep existing verification state on error
@@ -980,6 +982,65 @@ export default function App() {
       refreshCircleVerifications(circleId, selectedCycle)
     }
   }, [circleId, selectedCycle, authenticatedWallet, refreshCircleVerifications])
+
+  // Keep the dashboard synced with Tatum while visible. The pool balance and
+  // Move current_cycle are authoritative chain state; Tatum's per-member
+  // verification results fill in as newly broadcast transactions are indexed.
+  // The contract advances current_cycle only after the scheduled recipient's
+  // claim succeeds, so this refresh never advances the UI ahead of the vault.
+  useEffect(() => {
+    if (
+      activeTab !== 'dashboard' ||
+      !circleId ||
+      !poolAddress ||
+      !authenticatedWallet
+    ) {
+      return
+    }
+
+    const syncVisibleDashboard = async () => {
+      if (
+        backgroundChainSyncInFlight.current ||
+        document.visibilityState !== 'visible'
+      ) {
+        return
+      }
+
+      backgroundChainSyncInFlight.current = true
+      try {
+        await Promise.all([
+          refreshOnchainCircle(poolAddress, { silent: true }),
+          refreshCircleVerifications(circleId, selectedCycle),
+        ])
+        setLastChainSyncAt(Date.now())
+      } finally {
+        backgroundChainSyncInFlight.current = false
+      }
+    }
+
+    const timer = window.setInterval(() => {
+      void syncVisibleDashboard()
+    }, 8000)
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        void syncVisibleDashboard()
+      }
+    }
+    document.addEventListener('visibilitychange', handleVisibilityChange)
+
+    return () => {
+      window.clearInterval(timer)
+      document.removeEventListener('visibilitychange', handleVisibilityChange)
+    }
+  }, [
+    activeTab,
+    circleId,
+    poolAddress,
+    authenticatedWallet,
+    selectedCycle,
+    refreshOnchainCircle,
+    refreshCircleVerifications,
+  ])
 
   // Re-evaluate group policy whenever `withMemory` or `memoriesList` changes,
   // preserving the underlying chain status (`Late` remains `Late` as a chain fact).
@@ -1402,13 +1463,19 @@ export default function App() {
 
           const contributingMember = members.find((m) => m.address.toLowerCase() === targetAddress.toLowerCase())
           const inputKey = contributingMember ? `${contributingMember.id}_${selectedCycle}` : ''
+          let verificationRunInProgress = false
 
           const doVerify = async (attemptDigest: string) => {
+            if (verificationRunInProgress) return
+            verificationRunInProgress = true
             setTxModal((prev) => ({ ...prev, isVerifying: true }))
             try {
               let vRes: any = null
-              // Bounded retry up to 3 times to gracefully accommodate initial Tatum block indexing delay
-              for (let attempt = 1; attempt <= 3; attempt++) {
+              // Use one Tatum lookup per attempt with a short bounded backoff;
+              // the dashboard's periodic sync continues checking if indexing
+              // takes longer than this initial confirmation window.
+              const retryDelaysMs = [1000, 2000, 3500, 5000]
+              for (let attempt = 0; attempt <= retryDelaysMs.length; attempt++) {
                 vRes = await chainVerifier.verifyContribution({
                   circleId: circleId || 'default',
                   poolAddress,
@@ -1435,26 +1502,47 @@ export default function App() {
                     windowStart,
                     windowEnd,
                   },
-                })
+                }, { maxRetries: 0 })
 
-                const isSuccess = vRes.status === 'Verified' || vRes.status === 'Late'
-                if (isSuccess || attempt === 3) break
+                const isTatumConfirmed = [
+                  'Verified',
+                  'Late',
+                  'Partial',
+                  'WrongToken',
+                  'WrongAmount',
+                ].includes(vRes.status)
+                if (isTatumConfirmed || attempt === retryDelaysMs.length) break
 
-                // If not found yet because Tatum is still indexing, wait 2.5s and retry
                 const isIndexing =
-                  vRes.status === 'Unverified' &&
+                  vRes.code === 'indexing_pending' ||
+                  (vRes.status === 'Unverified' &&
                   (vRes.error?.toLowerCase()?.includes('not found') ||
                     vRes.rawNotes?.toLowerCase()?.includes('not found') ||
-                    vRes.error?.toLowerCase()?.includes('unavailable'))
+                    vRes.error?.toLowerCase()?.includes('unavailable')))
                 if (isIndexing) {
-                  await new Promise((r) => setTimeout(r, 2500))
+                  const waitMs = retryDelaysMs[attempt]
+                  setTxModal((prev) => ({
+                    ...prev,
+                    isVerifying: true,
+                    verificationPending: true,
+                    verificationNotes: `Tatum has not indexed this transaction yet. Checking again in ${Math.ceil(waitMs / 1000)} seconds...`,
+                  }))
+                  await new Promise((r) => setTimeout(r, waitMs))
                 } else {
                   // Final non-indexing outcome (Partial amount, timing window, etc.)
                   break
                 }
               }
 
-              const isSuccessVerified = vRes?.status === 'Verified' || vRes?.status === 'Late'
+              const isSuccessVerified =
+                vRes?.status === 'Verified' || vRes?.status === 'Late'
+              const isTatumConfirmed = [
+                'Verified',
+                'Late',
+                'Partial',
+                'WrongToken',
+                'WrongAmount',
+              ].includes(vRes?.status)
               if (inputKey && vRes) {
                 setVerifications((prev) => ({
                   ...prev,
@@ -1476,9 +1564,12 @@ export default function App() {
               setTxModal((prev) => ({
                 ...prev,
                 isVerifying: false,
-                verificationPending: !isSuccessVerified,
+                verificationPending: !isTatumConfirmed,
                 verificationNotes: note,
               }))
+              if (poolAddress) {
+                await refreshOnchainCircle(poolAddress, { silent: true })
+              }
             } catch (err: any) {
               setTxModal((prev) => ({
                 ...prev,
@@ -1486,6 +1577,8 @@ export default function App() {
                 verificationPending: true,
                 verificationNotes: err?.message || 'Verification attempt failed.',
               }))
+            } finally {
+              verificationRunInProgress = false
             }
           }
 
@@ -3564,7 +3657,16 @@ export default function App() {
 
                     <div className="flex items-start justify-between">
                       <div>
-                        <span className="text-sm text-tertiary">Verified on-chain pot this cycle</span>
+                        <div className="flex flex-wrap items-center gap-x-sm gap-y-xxs">
+                          <span className="text-sm text-tertiary">Verified on-chain pot this cycle</span>
+                          <span className={`inline-flex items-center gap-xxs text-[11px] ${rpcStatus.connected ? 'text-utility-success-700' : 'text-utility-warning-700'}`}>
+                            <span className={`size-1.5 rounded-full ${rpcStatus.connected ? 'bg-utility-success-600' : 'bg-utility-warning-600'}`} />
+                            {rpcStatus.connected ? 'Tatum live sync' : 'Tatum reconnecting'}
+                            {lastChainSyncAt
+                              ? ` · checked ${new Date(lastChainSyncAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', second: '2-digit' })}`
+                              : ''}
+                          </span>
+                        </div>
                         <div className="mt-xs text-heading-md font-semibold text-primary tabular-nums flex items-center gap-xs">
                           <TokenLogo symbol={tokenSymbol} className="size-6 shrink-0" />
                           <span>
