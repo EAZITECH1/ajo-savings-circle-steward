@@ -1755,10 +1755,10 @@ export default function App() {
       return
     }
 
-    if (prop.memberId && prop.memberId !== matchedMember.id) {
+    if (prop.memberId && prop.memberId !== matchedMember.id && !isConnectedOrganizer) {
       const targetName = members.find((m) => m.id === prop.memberId)?.name || prop.memberId
       setMemoryError(
-        `Authorization error: This proposal specifically pertains to ${targetName}. Only ${targetName}'s wallet can sign this agreement.`
+        `Authorization error: This proposal specifically pertains to ${targetName}. Only ${targetName} or the circle organizer can sign this agreement.`
       )
       return
     }
@@ -2680,7 +2680,7 @@ export default function App() {
 
   // Totals derived purely from real verified results
   const totalCycles = Math.max(members.length, 1)
-  const potPerCycle = members.length * contributionPerMember
+  const potPerCycle = Number((members.length * contributionPerMember).toFixed(9))
 
   const chainVerifiedCount = members.filter((m) => {
     const r = verifications[`${m.id}_${selectedCycle}`]
@@ -2693,7 +2693,7 @@ export default function App() {
   }).length
 
   const verifiedContributionSum = useMemo(() => {
-    return members.reduce((sum, m) => {
+    const rawSum = members.reduce((sum, m) => {
       const r = verifications[`${m.id}_${selectedCycle}`]
       if (!r || typeof r.amountReceived !== 'number') return sum
       if (r.status === 'Verified' || r.status === 'Late' || r.status === 'Partial' || r.status === 'WrongAmount') {
@@ -2701,6 +2701,7 @@ export default function App() {
       }
       return sum
     }, 0)
+    return Number(rawSum.toFixed(9))
   }, [members, verifications, selectedCycle])
 
   const totalOnchainPotReceived = useMemo(() => {
@@ -5283,6 +5284,11 @@ export default function App() {
                     {circleProposals.filter((p) => p.status === 'pending').length} pending
                   </span>
                 </div>
+                {memoryError && (
+                  <div className="p-sm rounded-lg bg-utility-error-50 border border-utility-error-200 text-xs text-utility-error-700 leading-relaxed break-words">
+                    {memoryError}
+                  </div>
+                )}
                 {circleProposals.length === 0 ? (
                   <p className="text-xs text-tertiary leading-relaxed">
                     No pending or rejected agreement proposals for this circle. Members can propose agreements from the Walrus Memory tab; non-organizer proposals appear here for the organizer to sign or reject.
