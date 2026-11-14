@@ -1162,6 +1162,31 @@ export default function App() {
 
   // Open transaction review modal for member contribution (supports late contributions)
   const selectedContributionAmountRef = useRef<number>(0)
+  const [isAcceptingCircle, setIsAcceptingCircle] = useState<boolean>(false)
+
+  const handleAcceptCircleTerms = async () => {
+    if (isAcceptingCircle || !poolAddress || !ajoConfig?.packageId) return
+    if (!currentAccount) {
+      setShowWalletModal(true)
+      return
+    }
+    setIsAcceptingCircle(true)
+    setWalletAuthError(null)
+    try {
+      const token = findTokenByCoinType(tokenType, explorerNetwork) || findTokenBySymbol('SUI', explorerNetwork)
+      const tx = buildAcceptCircleTx({
+        packageId: ajoConfig.packageId,
+        circleObjectId: poolAddress,
+        coinType: token?.coinType || tokenType || '0x2::sui::SUI',
+      })
+      await dAppKit.signAndExecuteTransaction({ transaction: tx })
+      await refreshOnchainCircle(poolAddress)
+    } catch (err: any) {
+      setWalletAuthError(err?.message || 'Failed to accept circle terms on-chain.')
+    } finally {
+      setIsAcceptingCircle(false)
+    }
+  }
 
   const handleOpenContributeModal = async (targetAddress: string, owedAmount: number) => {
     if (isUnsupportedCircleToken || tokenType.toLowerCase().includes('wal')) {
@@ -1454,6 +1479,12 @@ export default function App() {
           const doVerify = async (attemptDigest: string) => {
             setTxModal((prev) => ({ ...prev, isVerifying: true }))
             try {
+              const priorDigests = [
+                ...(Array.isArray(existingRaw?.txDigests) ? existingRaw.txDigests : []),
+                ...(existingRaw?.txDigest ? [existingRaw.txDigest] : []),
+              ].filter((d): d is string => Boolean(d && d.trim()))
+              const combinedDigests = Array.from(new Set([...priorDigests, attemptDigest]))
+
               let vRes: any = null
               // Bounded retry up to 3 times to gracefully accommodate initial Tatum block indexing delay
               for (let attempt = 1; attempt <= 3; attempt++) {
@@ -1464,11 +1495,12 @@ export default function App() {
                   memberId: contributingMember?.id,
                   memberName: contributingMember?.name,
                   token: token?.coinType || tokenType || '0x2::sui::SUI',
-                  expectedAmount: owedAmount,
+                  expectedAmount: contributionPerMember || owedAmount,
                   windowStart,
                   windowEnd,
                   cycle: selectedCycle,
                   txDigest: attemptDigest,
+                  txDigests: combinedDigests,
                   withMemory,
                   circleConfig: {
                     circleId: circleId || 'default',
@@ -3579,6 +3611,44 @@ export default function App() {
                           </>
                         )}
                       </button>
+                    </div>
+                  )}
+
+                  {isMatchingVault && onchainState?.status === 0 && (
+                    <div className="p-xl rounded-xl bg-utility-brand-50 border border-utility-brand-200 flex flex-col sm:flex-row sm:items-center justify-between gap-md">
+                      <div className="space-y-xxs min-w-0">
+                        <div className="flex items-center gap-xs text-sm font-semibold text-primary">
+                          <ShieldCheck className="size-4 text-brand-primary shrink-0" />
+                          <span>Pending Member Acceptance ({onchainState.acceptedMembers?.length || 0}/{members.length} accepted)</span>
+                        </div>
+                        <p className="text-xs text-secondary leading-relaxed">
+                          Sign <span className="font-mono text-[11px]">accept_circle</span> to formally accept terms on-chain, or make your Cycle 1 contribution to activate the circle immediately.
+                        </p>
+                      </div>
+                      {currentAccount &&
+                        connectedMember &&
+                        !onchainState.acceptedMembers?.some(
+                          (addr) => normalizeSuiAddress(addr) === normalizeSuiAddress(currentAccount.address)
+                        ) && (
+                          <button
+                            type="button"
+                            onClick={handleAcceptCircleTerms}
+                            disabled={isAcceptingCircle}
+                            className="inline-flex items-center gap-xs rounded-lg bg-brand-solid px-lg py-sm text-xs font-semibold text-primary-on-brand shadow-xs hover:bg-brand-solid-hover shrink-0 disabled:opacity-50"
+                          >
+                            {isAcceptingCircle ? (
+                              <>
+                                <Loader2 className="size-3.5 animate-spin" />
+                                <span>Signing Acceptance...</span>
+                              </>
+                            ) : (
+                              <>
+                                <CheckCircle2 className="size-3.5" />
+                                <span>Accept Circle Terms</span>
+                              </>
+                            )}
+                          </button>
+                        )}
                     </div>
                   )}
 
