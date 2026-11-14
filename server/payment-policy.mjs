@@ -862,12 +862,16 @@ export function detectPayoutSwapAgreement(memories = [], options = {}) {
   const swapMemory = memories.find((m) => {
     if (isQuarantinedSyntheticRecord(m)) return false
     if (m.category !== 'Agreements') return false
-    const text = `${m.title || ''} ${m.quote || ''} ${m.context || ''}`.toLowerCase()
+    // Inspect only user-authored title and quote (never system-generated context metadata)
+    const text = `${m.title || ''} ${m.quote || ''}`.toLowerCase()
+    const hasNegation =
+      /\b(no|not|never|disallow(?:ed)?|prohibit(?:ed)?)\s+(?:payout[\s-]*)?(?:swap|swaps|turn exchange)\b/i.test(text)
+    if (hasNegation) return false
     const isSwap =
-      text.includes('swap') ||
-      text.includes('payout order') ||
-      text.includes('payout-order') ||
-      text.includes('turn exchange')
+      /\b(swap|swapping|swapped)\b/i.test(text) ||
+      text.includes('turn exchange') ||
+      ((text.includes('payout order') || text.includes('payout-order')) &&
+        /\b(swap|exchange|trade|switch|change|reorder)\b/i.test(text))
     if (!isSwap) return false
     const cycleMatch = text.match(/\bcycle\s+(\d+)\b/i)
     if (currentCycleNum && cycleMatch && Number(cycleMatch[1]) !== currentCycleNum) {

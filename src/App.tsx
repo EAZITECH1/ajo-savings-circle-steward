@@ -3754,26 +3754,6 @@ export default function App() {
                           }}
                         />
                       </div>
-                      {potPerCycle > 0 &&
-                        totalOnchainPotReceived >= potPerCycle &&
-                        !isCycleClaimed(selectedCycle) && (
-                          <div className="p-md rounded-lg bg-utility-success-50 border border-utility-success-200 text-xs text-utility-success-700 flex items-center justify-between gap-sm flex-wrap">
-                            <span>
-                              <strong>All Cycle {selectedCycle} contributions complete!</strong>{' '}
-                              {scheduledRecipient?.name || 'The scheduled recipient'} can now claim the{' '}
-                              {potPerCycle.toLocaleString()} {tokenSymbol} pot to automatically advance the vault to Cycle{' '}
-                              {selectedCycle + 1 <= totalCycles ? selectedCycle + 1 : selectedCycle}.
-                            </span>
-                            <button
-                              type="button"
-                              onClick={() => setActiveTab('payout')}
-                              className="inline-flex items-center gap-xxs rounded-md bg-utility-success-700 px-md py-xs text-xs font-semibold text-fg-white hover:opacity-90"
-                            >
-                              <span>Claim & Advance Cycle</span>
-                              <ArrowRight className="size-3.5" />
-                            </button>
-                          </div>
-                        )}
                     </div>
 
                     {scheduledRecipient && (
@@ -6177,7 +6157,8 @@ export default function App() {
                                   <div>
                                     <ExplorerLink
                                       type="walrus"
-                                      id={payoutRec.payoutSwapAdvisory.walrusBlobId}
+                                      value={payoutRec.payoutSwapAdvisory.walrusBlobId}
+                                      network="mainnet"
                                       label={`Agreement Blob: ${payoutRec.payoutSwapAdvisory.walrusBlobId.slice(0, 10)}...`}
                                     />
                                   </div>
