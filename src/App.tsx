@@ -636,6 +636,10 @@ export default function App() {
     txDigest?: string | null
     errorMessage?: string | null
     isMoveVault?: boolean
+    allowSplitPayment?: boolean
+    maxAmount?: number
+    selectedAmount?: number
+    onSelectedAmountChange?: (amount: number) => void
     onConfirm: () => Promise<void>
     onRetryVerification?: () => Promise<void>
   }>({
@@ -1157,6 +1161,8 @@ export default function App() {
   }
 
   // Open transaction review modal for member contribution (supports late contributions)
+  const selectedContributionAmountRef = useRef<number>(0)
+
   const handleOpenContributeModal = async (targetAddress: string, owedAmount: number) => {
     if (isUnsupportedCircleToken || tokenType.toLowerCase().includes('wal')) {
       setWalletAuthError(
@@ -1284,6 +1290,8 @@ export default function App() {
         normalizeSuiAddress(activeOnchainForModal.objectId) === normalizeSuiAddress(poolAddress)
     )
 
+    selectedContributionAmountRef.current = owedAmount
+
     setTxModal({
       isOpen: true,
       actionTitle: isPastDeadline ? 'Deposit Late Contribution' : 'Deposit Cycle Contribution',
@@ -1305,6 +1313,29 @@ export default function App() {
       txDigest: null,
       errorMessage: null,
       isMoveVault: modalIsMoveVault,
+      allowSplitPayment: modalIsMoveVault,
+      maxAmount: owedAmount,
+      selectedAmount: owedAmount,
+      onSelectedAmountChange: (nextAmount: number) => {
+        selectedContributionAmountRef.current = nextAmount
+        const safeAmount = nextAmount > 0 ? nextAmount : 0
+        const nextBase = toBaseUnits(safeAmount, decimals)
+        const symbolLabel = token?.symbol || 'SUI'
+        const gasReserve = symbolLabel === 'SUI' ? 10_000_000n : 0n
+        const insufficient =
+          safeAmount > 0 && preflightBalance.heldBase < nextBase + gasReserve
+        setTxModal((prev) => ({
+          ...prev,
+          selectedAmount: nextAmount,
+          amountBase: nextBase,
+          amountDisplay: `${safeAmount} ${symbolLabel}`,
+          actionDescription: `Deposit ${safeAmount} ${symbolLabel} directly into circle vault (${poolAddress ? poolAddress.slice(0, 10) + '...' : ''})`,
+          isBalanceInsufficient: insufficient,
+          balanceErrorMessage: insufficient
+            ? `Your connected wallet holds ${preflightBalance.heldDisplay}, which is insufficient for ${safeAmount} ${symbolLabel}${symbolLabel === 'SUI' ? ' plus gas' : ''}.`
+            : null,
+        }))
+      },
       onConfirm: async () => {
         setTxModal((prev) => ({ ...prev, isSubmitting: true, errorMessage: null }))
         try {
@@ -1327,12 +1358,26 @@ export default function App() {
               'This pool address belongs to a circle member. A self-transfer will not fund the pool. Update the circle to use a dedicated vault address before contributing.',
             )
           }
+          const activeContributionAmount = modalIsMoveVault
+            ? selectedContributionAmountRef.current
+            : owedAmount
+          if (
+            !Number.isFinite(activeContributionAmount) ||
+            activeContributionAmount <= 0 ||
+            activeContributionAmount > owedAmount
+          ) {
+            throw new Error(
+              `Enter a valid contribution tranche between 0 and ${owedAmount} ${token?.symbol || 'SUI'}.`
+            )
+          }
+          const activeAmountBase = toBaseUnits(activeContributionAmount, decimals)
+
           // Re-verify balance and select fresh coin objects immediately before building
           const freshBalance = await verifyWalletBalance({
             network: explorerNetwork,
             ownerAddress: currentAccount.address,
             coinType: token?.coinType || '0x2::sui::SUI',
-            requiredAmountBase: amountBase,
+            requiredAmountBase: activeAmountBase,
             decimals,
             symbol: token?.symbol || 'SUI',
           })
@@ -1374,7 +1419,7 @@ export default function App() {
           const tx = buildContributeTx({
             packageId: ajoConfig!.packageId,
             circleObjectId: poolAddress,
-            amountBase,
+            amountBase: activeAmountBase,
             coinType: token?.coinType || '0x2::sui::SUI',
             coinObjectIds: freshBalance.selectedCoinObjectIds,
             useAddressBalance: freshBalance.useAddressBalance,
@@ -6490,6 +6535,10 @@ export default function App() {
         errorMessage={txModal.errorMessage}
         network={rpcStatus.network?.includes('mainnet') ? 'mainnet' : 'testnet'}
         isMoveVault={txModal.isMoveVault !== undefined ? txModal.isMoveVault : isMoveCircleVault}
+        allowSplitPayment={txModal.allowSplitPayment}
+        maxAmount={txModal.maxAmount}
+        selectedAmount={txModal.selectedAmount}
+        onSelectedAmountChange={txModal.onSelectedAmountChange}
       />
 
       {/* Guided Tour Modal */}

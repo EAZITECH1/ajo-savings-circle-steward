@@ -44,6 +44,10 @@ export interface TransactionReviewProps {
   balanceErrorMessage?: string | null
   senderAddress?: string
   isMoveVault?: boolean
+  allowSplitPayment?: boolean
+  maxAmount?: number
+  selectedAmount?: number
+  onSelectedAmountChange?: (amount: number) => void
 }
 
 export const TransactionReviewModal: React.FC<TransactionReviewProps> = ({
@@ -76,8 +80,21 @@ export const TransactionReviewModal: React.FC<TransactionReviewProps> = ({
   balanceErrorMessage,
   senderAddress,
   isMoveVault = false,
+  allowSplitPayment = false,
+  maxAmount,
+  selectedAmount,
+  onSelectedAmountChange,
 }) => {
   if (!isOpen) return null
+
+  const isInvalidSplitAmount = Boolean(
+    allowSplitPayment &&
+      maxAmount !== undefined &&
+      (selectedAmount === undefined ||
+        !Number.isFinite(selectedAmount) ||
+        selectedAmount <= 0 ||
+        selectedAmount > maxAmount)
+  )
 
   const explorerBase =
     network === 'mainnet'
@@ -278,6 +295,70 @@ export const TransactionReviewModal: React.FC<TransactionReviewProps> = ({
                   </div>
                 )}
 
+                {allowSplitPayment && maxAmount && maxAmount > 0 && token && onSelectedAmountChange && (
+                  <div className="p-md space-y-sm bg-primary/40">
+                    <div className="flex flex-wrap items-center justify-between gap-xs">
+                      <span className="text-secondary font-medium">Payment Tranche (Split Allowed)</span>
+                      <div className="flex flex-wrap items-center gap-xs">
+                        <button
+                          type="button"
+                          onClick={() => onSelectedAmountChange(maxAmount)}
+                          className={`px-sm py-0.5 rounded-full text-[11px] font-medium border transition-colors ${
+                            selectedAmount === maxAmount
+                              ? 'bg-utility-brand-50 text-brand-primary border-utility-brand-300'
+                              : 'bg-secondary text-secondary border-secondary hover:text-primary'
+                          }`}
+                        >
+                          Full ({maxAmount} {token.symbol})
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const half = Number((maxAmount / 2).toFixed(Math.min(token.decimals, 6)))
+                            if (half > 0) onSelectedAmountChange(half)
+                          }}
+                          className={`px-sm py-0.5 rounded-full text-[11px] font-medium border transition-colors ${
+                            selectedAmount === Number((maxAmount / 2).toFixed(Math.min(token.decimals, 6)))
+                              ? 'bg-utility-brand-50 text-brand-primary border-utility-brand-300'
+                              : 'bg-secondary text-secondary border-secondary hover:text-primary'
+                          }`}
+                        >
+                          50% Split ({Number((maxAmount / 2).toFixed(Math.min(token.decimals, 6)))} {token.symbol})
+                        </button>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-xs">
+                      <input
+                        type="number"
+                        min="0"
+                        max={maxAmount}
+                        step="any"
+                        value={selectedAmount ?? ''}
+                        onChange={(e) => {
+                          const parsed = parseFloat(e.target.value)
+                          onSelectedAmountChange(Number.isFinite(parsed) ? parsed : 0)
+                        }}
+                        className="w-full px-sm py-xs rounded-lg border border-primary bg-primary text-sm font-semibold text-primary tabular-nums focus:outline-none focus:ring-2 focus:ring-brand-primary"
+                        aria-label="Contribution tranche amount"
+                      />
+                      <span className="text-xs font-semibold text-secondary shrink-0">{token.symbol}</span>
+                    </div>
+                    {isInvalidSplitAmount ? (
+                      <p className="text-[11px] text-error-primary">
+                        Enter an amount greater than 0 and at most {maxAmount} {token.symbol}.
+                      </p>
+                    ) : selectedAmount !== undefined && selectedAmount < maxAmount ? (
+                      <p className="text-[11px] text-tertiary">
+                        Partial tranche: {Number((maxAmount - selectedAmount).toFixed(Math.min(token.decimals, 6)))} {token.symbol} will remain owed for this cycle.
+                      </p>
+                    ) : (
+                      <p className="text-[11px] text-tertiary">
+                        Pays the full remaining balance ({maxAmount} {token.symbol}) for this cycle.
+                      </p>
+                    )}
+                  </div>
+                )}
+
                 {amountDisplay && (
                   <div className="p-md flex items-center justify-between gap-sm bg-primary/40">
                     <span className="text-secondary font-medium shrink-0">Exact Amount Due</span>
@@ -373,8 +454,14 @@ export const TransactionReviewModal: React.FC<TransactionReviewProps> = ({
               <button
                 type="button"
                 onClick={onConfirm}
-                disabled={isSubmitting || isBalanceInsufficient}
-                title={isBalanceInsufficient ? 'Cannot sign with insufficient wallet balance' : undefined}
+                disabled={isSubmitting || isBalanceInsufficient || isInvalidSplitAmount}
+                title={
+                  isBalanceInsufficient
+                    ? 'Cannot sign with insufficient wallet balance'
+                    : isInvalidSplitAmount
+                    ? 'Enter a valid contribution amount'
+                    : undefined
+                }
                 className="inline-flex items-center gap-xs px-xl py-sm rounded-lg bg-brand-solid text-primary-on-brand text-sm font-semibold hover:bg-brand-solid-hover shadow-xs disabled:opacity-50 disabled:cursor-not-allowed transition-all"
               >
                 {isSubmitting ? (
