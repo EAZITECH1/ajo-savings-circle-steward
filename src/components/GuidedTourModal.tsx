@@ -46,7 +46,7 @@ export const TOUR_STEPS: TourStep[] = [
     icon: PlusCircle,
     badge: 'Step 1 of 5',
     description:
-      'Circle organizers configure the circle name, contribution token (SUI or USDC), and rotation frequency (Daily, Weekly, Monthly, or 5-Minute Demo). Wall-clock deadlines stay aligned across daylight-saving transitions in your chosen time zone.',
+      'Circle organizers configure the circle name, contribution token (SUI or USDC), rotation frequency (Daily, Weekly, Monthly, or 5-Minute Demo), and optional Circle Rules & Guidelines for the AI Steward. Wall-clock deadlines stay aligned across daylight-saving transitions in your chosen time zone.',
     automatedNote: 'Cycle deadlines and cadence durations are computed automatically.',
     signatureNote: 'The organizer signs 1 wallet transaction to deploy the Move shared vault object on Sui Testnet.',
     suggestedAction: {

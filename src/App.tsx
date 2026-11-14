@@ -4813,7 +4813,7 @@ export default function App() {
               <div className="flex items-center justify-between text-xs text-secondary">
                 <span>Pool vault</span>
                 <span className="font-mono text-xs text-primary truncate max-w-[140px]" title={createPoolAddress}>
-                  {createPoolAddress ? `${createPoolAddress.slice(0, 6)}...${createPoolAddress.slice(-4)}` : 'Auto-configured'}
+                  {createPoolAddress ? `${createPoolAddress.slice(0, 6)}...${createPoolAddress.slice(-4)}` : 'Pending vault deployment'}
                 </span>
               </div>
             </div>
