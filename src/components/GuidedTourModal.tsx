@@ -186,14 +186,11 @@ export const GuidedTourModal: React.FC<GuidedTourModalProps> = ({
       aria-modal="true"
       aria-labelledby="tour-modal-title"
     >
-      <div className="relative w-full max-w-xl rounded-2xl bg-primary border border-secondary shadow-2xl p-xl sm:p-2xl space-y-lg">
-        {/* Top Header Row: Badge, Step counter, Close Button */}
+      <div className="relative w-full max-w-xl max-h-[90vh] overflow-y-auto rounded-2xl bg-primary border border-secondary shadow-2xl p-xl sm:p-2xl space-y-lg">
+        {/* Top Header Row: Badge, Close Button */}
         <div className="flex items-center justify-between border-b border-secondary pb-md">
           <div className="flex items-center gap-xs">
             <span className="px-sm py-0.5 rounded-full text-xs font-semibold bg-utility-brand-50 text-utility-brand-700 border border-utility-brand-200">
-              {step.badge}
-            </span>
-            <span className="text-xs text-tertiary">
               Step {currentStepIndex + 1} of {TOUR_STEPS.length}
             </span>
           </div>

@@ -720,7 +720,7 @@ export default function App() {
       const [cfg, overviewCircles, walrusCircles] = await Promise.all([
         fetchAjoConfig().catch(() => null),
         fetchCirclesOverview().catch(() => []),
-        memoryStore.listCircles().catch(() => []),
+        authenticatedWallet ? memoryStore.listCircles().catch(() => []) : Promise.resolve([]),
       ])
       if (cfg) setAjoConfig(cfg)
       const map = new Map<string, any>()
@@ -735,7 +735,7 @@ export default function App() {
     } catch (err) {
       console.warn('Config / overview refresh note:', err)
     }
-  }, [])
+  }, [authenticatedWallet])
 
   useEffect(() => {
     refreshAjoConfigAndCircles()
@@ -2694,7 +2694,7 @@ export default function App() {
   )
 
   return (
-    <div className="min-h-screen bg-secondary text-primary font-sans flex flex-col antialiased pb-20 lg:pb-8">
+    <div className="min-h-screen bg-secondary text-primary font-sans flex flex-col antialiased pb-24 lg:pb-8">
       {/* Sticky Full-Width Header with Desktop Navigation & Prominent Wallet Control */}
       <header className="sticky top-0 z-30 bg-primary border-b border-secondary shadow-xs">
         <div className="max-w-7xl mx-auto px-md sm:px-lg lg:px-xl py-md sm:py-lg flex items-center justify-between gap-md lg:gap-xl">
@@ -2792,14 +2792,15 @@ export default function App() {
                 >
                   <Bell className="size-4 shrink-0" />
                   {unreadNotificationsCount > 0 && (
-                    <span className="absolute -top-1 -right-1 inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-full bg-error-solid text-[10px] font-bold text-fg-white">
-                      {unreadNotificationsCount > 9 ? '9+' : unreadNotificationsCount}
-                    </span>
+                    <span
+                      aria-label={`${unreadNotificationsCount} unread notifications`}
+                      className="absolute top-1 right-1 w-2.5 h-2.5 rounded-full bg-brand-solid ring-2 ring-primary"
+                    />
                   )}
                 </button>
 
                 {showNotificationsDropdown && (
-                  <div className="absolute right-0 mt-xs w-80 sm:w-96 rounded-xl border border-secondary bg-primary shadow-lg z-50 overflow-hidden">
+                  <div className="absolute right-0 mt-xs w-[calc(100vw-2rem)] sm:w-96 max-w-sm rounded-xl border border-secondary bg-primary shadow-lg z-50 overflow-hidden">
                     <div className="flex items-center justify-between px-lg py-md border-b border-secondary bg-secondary/40">
                       <div className="flex items-center gap-xs">
                         <Bell className="size-4 text-fg-brand-primary" />
@@ -2812,10 +2813,12 @@ export default function App() {
                           </span>
                         )}
                       </div>
-                      {notifications.length > 0 && (
+                      {unreadNotificationsCount > 0 && (
                         <button
                           type="button"
                           onClick={async () => {
+                            setNotifications((prev) => prev.map((n) => ({ ...n, read: true })))
+                            setUnreadNotificationsCount(0)
                             await markAllNotificationsAsRead(circleId || undefined)
                             await refreshNotificationsOnly()
                           }}
@@ -2859,6 +2862,12 @@ export default function App() {
                                   <button
                                     type="button"
                                     onClick={async () => {
+                                      if (!notif.read) {
+                                        setNotifications((prev) =>
+                                          prev.map((n) => (n.id === notif.id ? { ...n, read: true } : n))
+                                        )
+                                        setUnreadNotificationsCount((c) => Math.max(0, c - 1))
+                                      }
                                       await markNotificationAsRead(notif.id)
                                       await refreshNotificationsOnly()
                                       setShowNotificationsDropdown(false)
@@ -2878,12 +2887,16 @@ export default function App() {
                                   <button
                                     type="button"
                                     onClick={async () => {
+                                      setNotifications((prev) =>
+                                        prev.map((n) => (n.id === notif.id ? { ...n, read: true } : n))
+                                      )
+                                      setUnreadNotificationsCount((c) => Math.max(0, c - 1))
                                       await markNotificationAsRead(notif.id)
                                       await refreshNotificationsOnly()
                                     }}
                                     className="text-[11px] text-tertiary hover:text-primary"
                                   >
-                                    Dismiss
+                                    Mark as read
                                   </button>
                                 )}
                               </div>
@@ -3036,7 +3049,7 @@ export default function App() {
         <aside
           aria-live="polite"
           aria-atomic="true"
-          className="fixed bottom-6 right-6 z-50 max-w-md w-full px-md pointer-events-none"
+          className="fixed bottom-20 lg:bottom-6 left-md right-md sm:left-auto sm:right-6 z-50 sm:max-w-md sm:w-full pointer-events-none"
         >
           <div
             className={`pointer-events-auto rounded-xl border p-md shadow-lg backdrop-blur-md flex items-start gap-sm transition-all duration-300 animate-in slide-in-from-bottom-3 ${
@@ -4976,7 +4989,7 @@ export default function App() {
                 </div>
               )}
 
-              <div className="px-lg py-sm border-t border-secondary bg-primary flex items-center gap-xs overflow-x-auto whitespace-nowrap">
+              <div className="px-lg py-sm border-t border-secondary bg-primary flex flex-wrap items-center gap-xs">
                 <span className="text-xs text-tertiary shrink-0">Ask:</span>
                 {[
                   'Is any late payment covered by a recorded grace rule?',
@@ -4987,7 +5000,7 @@ export default function App() {
                     key={idx}
                     onClick={() => handleSendMessage(chip)}
                     disabled={!stewardStatus.available || isChatTyping}
-                    className="inline-flex items-center gap-xs rounded-full border border-utility-gray-200 bg-utility-gray-50 px-md py-xxs text-xs font-medium text-utility-gray-700 hover:bg-secondary-hover disabled:opacity-50 shrink-0"
+                    className="inline-flex items-center gap-xs rounded-full border border-utility-gray-200 bg-utility-gray-50 px-md py-xxs text-xs font-medium text-utility-gray-700 hover:bg-secondary-hover disabled:opacity-50 text-left max-w-full"
                   >
                     {chip}
                   </button>
@@ -5386,60 +5399,129 @@ export default function App() {
                     Propose circle memory
                   </h4>
                   <p className="text-xs text-tertiary">
-                    Requires member confirmation before permanent Walrus storage
+                    {!isConnectedOrganizer && manualCategory === 'Agreements'
+                      ? "Sent to the circle organizer's Steward Chat for approval & signature before writing to Walrus"
+                      : 'Requires wallet signature before permanent Walrus storage'}
                   </p>
                 </div>
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-md">
-                  <select
-                    value={manualCategory}
-                    onChange={(e) => setManualCategory(e.target.value as MemoryCategory)}
-                    className="rounded-md bg-primary px-lg py-md text-xs text-primary border border-primary focus-visible:ring-2 focus-visible:ring-focus-ring"
-                  >
-                    <option value="Agreements">Agreements</option>
-                    <option value="Member patterns">Member patterns</option>
-                    <option value="Reminder preferences">Reminder preferences</option>
-                  </select>
-                  <select
-                    value={manualMemberId}
-                    onChange={(e) => setManualMemberId(e.target.value)}
-                    className="rounded-md bg-primary px-lg py-md text-xs text-primary border border-primary focus-visible:ring-2 focus-visible:ring-focus-ring"
-                  >
-                    <option value="">Circle-wide (or select member)</option>
-                    {members.map((m) => (
-                      <option key={m.id} value={m.id}>
-                        {m.name} ({m.id})
-                      </option>
+
+                {/* Quick Templates */}
+                <div className="space-y-xs">
+                  <span className="text-[11px] font-medium text-tertiary">
+                    Quick templates (optional)
+                  </span>
+                  <div className="flex flex-wrap gap-xs">
+                    {[
+                      {
+                        label: 'Grace Window',
+                        category: 'Agreements' as MemoryCategory,
+                        title: `10 Minutes Grace Window for Cycle ${selectedCycle}`,
+                        quote: `Group agreed to allow a 10 minutes grace window for Cycle ${selectedCycle} contributions without marking as unexcused.`,
+                      },
+                      {
+                        label: '2-Tranche Split',
+                        category: 'Member patterns' as MemoryCategory,
+                        title: `Two-Tranche Split Pattern (Cycle ${selectedCycle})`,
+                        quote: `Member prefers splitting Cycle ${selectedCycle} contribution into 2 tranches within the 48-hour split window.`,
+                      },
+                      {
+                        label: 'Reminder Cadence',
+                        category: 'Reminder preferences' as MemoryCategory,
+                        title: 'Evening 6pm Reminder Opt-In',
+                        quote: 'Member opted in to receive contribution reminders at 6pm local time 24 hours before cycle deadline.',
+                      },
+                      {
+                        label: 'Payout Swap Note',
+                        category: 'Agreements' as MemoryCategory,
+                        title: `Cycle ${selectedCycle} Payout Order Swap Agreement`,
+                        quote: `Members agreed to swap Cycle ${selectedCycle} payout order off-chain (advisory note; Move contract payout_order remains fixed).`,
+                      },
+                    ].map((tpl) => (
+                      <button
+                        key={tpl.label}
+                        type="button"
+                        onClick={() => {
+                          setManualCategory(tpl.category)
+                          setManualTitle(tpl.title)
+                          setManualQuote(tpl.quote)
+                          setManualRule(tpl.quote)
+                        }}
+                        className="rounded-full bg-secondary hover:bg-secondary-hover border border-secondary px-md py-xxs text-[11px] font-medium text-secondary hover:text-primary transition-colors"
+                      >
+                        + {tpl.label}
+                      </button>
                     ))}
-                  </select>
+                  </div>
                 </div>
-                <input
-                  type="text"
-                  value={manualTitle}
-                  onChange={(e) => setManualTitle(e.target.value)}
-                  placeholder="Memory title (e.g. 72-Hour Contractor Grace Window)"
-                  className="w-full rounded-md bg-primary px-lg py-md text-xs text-primary placeholder:text-placeholder border border-primary focus-visible:ring-2 focus-visible:ring-focus-ring"
-                />
-                <input
-                  type="text"
-                  value={manualQuote}
-                  onChange={(e) => setManualQuote(e.target.value)}
-                  placeholder="Source quote or statement..."
-                  className="w-full rounded-md bg-primary px-lg py-md text-xs text-primary placeholder:text-placeholder border border-primary focus-visible:ring-2 focus-visible:ring-focus-ring"
-                />
-                <input
-                  type="text"
-                  value={manualRule}
-                  onChange={(e) => setManualRule(e.target.value)}
-                  placeholder="Policy rule / action summary..."
-                  className="w-full rounded-md bg-primary px-lg py-md text-xs text-primary placeholder:text-placeholder border border-primary focus-visible:ring-2 focus-visible:ring-focus-ring"
-                />
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-md">
+                  <label className="space-y-xxs block">
+                    <span className="text-[11px] font-medium text-secondary">Category</span>
+                    <select
+                      value={manualCategory}
+                      onChange={(e) => setManualCategory(e.target.value as MemoryCategory)}
+                      className="w-full rounded-md bg-primary px-lg py-md text-xs text-primary border border-primary focus-visible:ring-2 focus-visible:ring-focus-ring"
+                    >
+                      <option value="Agreements">Agreements (Grace, Payout Swap)</option>
+                      <option value="Member patterns">Member patterns (Split Payments)</option>
+                      <option value="Reminder preferences">Reminder preferences (Opt-in)</option>
+                    </select>
+                  </label>
+                  <label className="space-y-xxs block">
+                    <span className="text-[11px] font-medium text-secondary">Applies to</span>
+                    <select
+                      value={manualMemberId}
+                      onChange={(e) => setManualMemberId(e.target.value)}
+                      className="w-full rounded-md bg-primary px-lg py-md text-xs text-primary border border-primary focus-visible:ring-2 focus-visible:ring-focus-ring"
+                    >
+                      <option value="">All members (Circle-wide)</option>
+                      {members.map((m) => (
+                        <option key={m.id} value={m.id}>
+                          {m.name} ({m.id})
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                </div>
+
+                <label className="space-y-xxs block">
+                  <span className="text-[11px] font-medium text-secondary">Title</span>
+                  <input
+                    type="text"
+                    value={manualTitle}
+                    onChange={(e) => setManualTitle(e.target.value)}
+                    placeholder={`e.g. 10 Minutes Grace Window for Cycle ${selectedCycle}`}
+                    className="w-full rounded-md bg-primary px-lg py-md text-xs text-primary placeholder:text-placeholder border border-primary focus-visible:ring-2 focus-visible:ring-focus-ring"
+                  />
+                </label>
+
+                <label className="space-y-xxs block">
+                  <span className="text-[11px] font-medium text-secondary">
+                    Agreement / Rule Details
+                  </span>
+                  <textarea
+                    rows={3}
+                    value={manualQuote}
+                    onChange={(e) => {
+                      setManualQuote(e.target.value)
+                      setManualRule(e.target.value)
+                    }}
+                    placeholder="Describe what was agreed or the member preference (include duration like '10 minutes' and cycle like 'Cycle 2' if applicable)..."
+                    className="w-full rounded-md bg-primary px-lg py-md text-xs text-primary placeholder:text-placeholder border border-primary focus-visible:ring-2 focus-visible:ring-focus-ring"
+                  />
+                </label>
+
                 <div className="flex justify-end pt-sm">
                   <button
                     type="button"
                     onClick={handleProposeManualMemory}
-                    className="inline-flex items-center gap-xs rounded-lg bg-primary px-xl py-md text-xs font-semibold text-brand-primary border border-primary shadow-xs hover:bg-primary-hover focus-visible:ring-2 focus-visible:ring-focus-ring"
+                    className="inline-flex items-center gap-xs rounded-lg bg-brand-solid px-xl py-md text-xs font-semibold text-primary-on-brand shadow-xs hover:bg-brand-solid-hover focus-visible:ring-2 focus-visible:ring-focus-ring"
                   >
-                    <span>Stage memory proposal</span>
+                    <span>
+                      {!isConnectedOrganizer && manualCategory === 'Agreements'
+                        ? 'Submit to Organizer for Approval'
+                        : 'Stage Proposal for Signature'}
+                    </span>
                   </button>
                 </div>
 

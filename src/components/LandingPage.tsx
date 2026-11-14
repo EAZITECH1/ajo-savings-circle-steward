@@ -166,7 +166,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({
           <div className="pt-sm flex flex-wrap items-center justify-center gap-md text-sm text-tertiary">
             <div className="flex items-center gap-xs">
               <span className={`w-2.5 h-2.5 rounded-full ${isRpcConnected ? 'bg-utility-success-500' : 'bg-utility-warning-500'}`} />
-              <span>Tatum Sui {networkName || 'Testnet'}: {isRpcConnected ? 'Connected' : 'Connecting...'}</span>
+              <span>Tatum {networkName || 'Sui Testnet'}: {isRpcConnected ? 'Connected' : 'Connecting...'}</span>
             </div>
             <span>·</span>
             <div className="flex items-center gap-xs">
@@ -676,7 +676,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-md text-xs sm:text-sm">
           <div className="p-lg rounded-lg bg-secondary/40 border border-secondary space-y-xs">
             <span className="text-tertiary text-xs sm:text-sm">Active Chain & Network</span>
-            <p className="text-base sm:text-lg font-bold text-primary uppercase">Sui {networkName || 'Testnet'}</p>
+            <p className="text-base sm:text-lg font-bold text-primary uppercase">{networkName || 'Sui Testnet'}</p>
             <p className="text-xs sm:text-sm text-secondary leading-relaxed">Tokens (SUI, USDC) are testnet assets on Sui Testnet.</p>
           </div>
           <div className="p-lg rounded-lg bg-secondary/40 border border-secondary space-y-xs">
