@@ -19,10 +19,10 @@ Ajo Steward modernizes community peer-to-peer rotating savings groups. Instead o
 * **Circle Organizers:** Community leaders burdened with manual bookkeeping, tracking who paid late, and answering endless status questions.
 
 ### The Actual User Journey
-1. **Circle Creation & Move Vault Deployment:** The organizer defines contribution amounts, cadence (daily, weekly, monthly), and member addresses. The organizer signs one Sui wallet transaction to instantiate a fresh on-chain `Circle<T>` shared object, and the circle configuration is committed to Walrus Memory.
+1. **Circle Creation & Move Vault Deployment:** The organizer defines contribution amounts, cadence (daily, weekly, monthly), member addresses, and optional **Circle Rules & Guidelines** (via 1-click starter chips or custom policy text). The organizer signs one Sui wallet transaction to instantiate a fresh on-chain `Circle<T>` shared object, and both the circle configuration and any founding rules (`Founding Circle Rules & Guidelines` `Agreements` record) are committed to Walrus Memory and displayed on the Dashboard.
 2. **Member Acceptance & Cycle Activation:** Members connect their Sui wallets and accept circle terms. Once initialized, the cycle countdown begins.
 3. **Contribution & Tatum Verification:** Members submit deposits (`contribute<T>`) to the vault. When a transaction digest is submitted, the backend queries Tatum Sui Gateway to confirm the sender, recipient vault, coin type, amount, and timestamp.
-4. **Governance & Memory Storage:** If a member requires an approved grace period or payout swap, the agreement is signed and permanently saved to Walrus. Late payments are factually logged to Walrus as historical behavior.
+4. **Governance, Notifications & Memory Storage:** Members can propose agreements (grace windows, split-payment rules, payout swaps) for organizer review/approval or rejection in Steward Chat, and receive in-app notifications (unread indicator dot, approval/rejection updates, and overdue contribution reminders). Confirmed agreements and factual late/split-payment records are permanently saved to Walrus.
 5. **Pot Distribution:** Payout claims (`claim_cycle<T>`) are executed on-chain directly by the scheduled recipient.
 6. **Disaster Recovery:** If the application restarts, the entire circle state is reconstructed from Walrus Mainnet and re-verified on-chain via Tatum.
 
@@ -57,8 +57,8 @@ Ajo Steward integrates **Walrus Memory** (`@mysten-incubation/memwal`) on **Walr
 
 ### What Ajo Steward Stores in Walrus
 Every record is stored under an isolated namespace (`ajo-circle:<circleId>`) using the `schema: 'ajo-steward-memory/v2'` format:
-1. **`circle_config`**: The immutable, versioned configuration of the circle, including Move vault object ID, token type, cadence, time zone, and hash chain.
-2. **`agreement`**: Group decisions (e.g., approved custom grace windows, agreed payout-order swaps) confirmed by members.
+1. **`circle_config`**: The immutable, versioned configuration of the circle, including Move vault object ID, token type, cadence, time zone, optional `circleRules`, and hash chain.
+2. **`agreement`**: Group decisions (founding Circle Rules & Guidelines committed at creation, approved custom grace windows, agreed payout-order swaps) confirmed by the organizer or members.
 3. **`member_pattern`**: Recorded operational arrangements (e.g., preference for two-tranche split contributions).
 4. **`reminder_preference`**: Opted-in member reminder preferences and factual reminder conversion outcomes recorded after Tatum-confirmed payments.
 5. **`historical_behavior`**: Factual records of verified late completions, grace-window outcomes, and multi-tranche split completion patterns, timestamped and linked to Sui transaction digests.
@@ -164,7 +164,7 @@ npm install
 ```
 
 ### 3. Run Automated Test Suite
-Runs the automated unit, contract, and integration test suite (`66` tests; live Tatum Sui testnet lookup skips if `TATUM_API_KEY` is unconfigured):
+Runs the automated unit, contract, and integration test suite (`68` tests — `67` passed, `1` live Tatum Sui testnet lookup skipped when `TATUM_API_KEY` is unconfigured):
 ```bash
 npm test
 ```

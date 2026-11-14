@@ -6,6 +6,7 @@ import { Secp256r1Keypair } from '@mysten/sui/keypairs/secp256r1'
 import {
   resolveCircleNamespace,
   upsertCircleRoster,
+  persistCircleConfigToWalrus,
   verifyCircleMembership,
   proposeCircleMemory,
   rejectCircleProposal,
@@ -611,4 +612,72 @@ test('Organizer approval & notifications: non-organizer agreement requires organ
   const memNotifs = listNotificationsForUser({ walletAddress: memAddr, circleId })
   assert.ok(memNotifs.some((n) => n.type === 'proposal_rejected'))
   assert.ok(memNotifs.some((n) => n.type === 'contribution_overdue'))
+})
+
+test('upsertCircleRoster & persistCircleConfigToWalrus persist circleRules and commit founding Agreements memory', async () => {
+  const orgKp = Ed25519Keypair.generate()
+  const memKp = Ed25519Keypair.generate()
+  const orgAddr = orgKp.getPublicKey().toSuiAddress()
+  const memAddr = memKp.getPublicKey().toSuiAddress()
+  const circleId = `circle-rules-${Date.now()}`
+  const rulesText =
+    'Members get a 48-hour grace period.\nSplit payments are allowed before the cycle deadline.'
+
+  const roster = upsertCircleRoster(
+    {
+      circleId,
+      circleName: 'Rules Circle',
+      poolAddress: '0x000000000000000000000000000000000000000000000000000000000000cafe',
+      contributionPerMember: 10,
+      tokenType: '0x2::sui::SUI',
+      cycleLength: 'Monthly',
+      currentCycle: 1,
+      organizerAddress: orgAddr,
+      circleRules: rulesText,
+      members: [
+        { id: 'm1', name: 'Organizer', address: orgAddr },
+        { id: 'm2', name: 'Member', address: memAddr },
+      ],
+    },
+    { authenticatedWalletAddress: orgAddr }
+  )
+
+  assert.equal(roster.circleRules, rulesText)
+
+  let rememberCalls = 0
+  const mockClient = {
+    rememberAndWait: async (_text, namespace) => {
+      rememberCalls += 1
+      return {
+        id: `job-${rememberCalls}`,
+        blob_id: `blob-rules-${rememberCalls}`,
+        namespace,
+        owner: orgAddr,
+      }
+    },
+  }
+
+  const persisted = await persistCircleConfigToWalrus(
+    {
+      circleId,
+      memberId: 'm1',
+      memberAddress: orgAddr,
+      allowUnsignedOrganizerSetup: true,
+      memwalClientOverride: mockClient,
+    },
+    {}
+  )
+
+  assert.equal(persisted.walrusBlobId, 'blob-rules-1')
+  assert.equal(persisted.foundingRulesBlobId, 'blob-rules-2')
+  assert.equal(persisted.circle.circleRules, rulesText)
+  assert.equal(rememberCalls, 2)
+
+  const cachedMemories = getSessionConfirmedCircleMemories(circleId)
+  const rulesMemory = cachedMemories.find((m) => m.walrusBlobId === 'blob-rules-2')
+  assert.ok(rulesMemory, 'Expected founding circle rules to be cached in sessionConfirmedCache')
+  assert.equal(rulesMemory.category, 'Agreements')
+  assert.equal(rulesMemory.memoryType, 'agreement')
+  assert.equal(rulesMemory.title, 'Founding Circle Rules & Guidelines')
+  assert.equal(rulesMemory.quote, rulesText)
 })

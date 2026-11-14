@@ -330,6 +330,7 @@ export default function App() {
   const [createMembers, setCreateMembers] = useState<Member[]>([])
   const [createProposedCircleId, setCreateProposedCircleId] = useState<string>('')
   const [createPoolAddress, setCreatePoolAddress] = useState<string>('')
+  const [createCircleRules, setCreateCircleRules] = useState<string>('')
 
   // User-configured Circle Details (Active Circle displayed on Dashboard)
   const [circleId, setCircleId] = useState<string>(() => getSavedCircleId())
@@ -360,6 +361,7 @@ export default function App() {
       return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1, 0, 0, 0)).toISOString()
     }
   })
+  const [circleRules, setCircleRules] = useState<string>('')
 
   // Active Circle Members list (starts empty — populated from registered server circle)
   const [members, setMembers] = useState<Member[]>([])
@@ -803,6 +805,7 @@ export default function App() {
         if (latest.timeZone) setTimeZone(latest.timeZone)
         if (latest.windowStart) setWindowStart(latest.windowStart)
         if (latest.windowEnd) setWindowEnd(latest.windowEnd)
+        setCircleRules(latest.circleRules || '')
         setSelectedCycle(latest.currentCycle || 1)
         setMembers(latest.members || [])
         if (latest.members?.[0]?.id) setConfirmingMemberId(latest.members[0].id)
@@ -2021,6 +2024,7 @@ export default function App() {
         if (outcome.circle.timeZone) setTimeZone(outcome.circle.timeZone)
         if (outcome.circle.windowStart) setWindowStart(outcome.circle.windowStart)
         if (outcome.circle.windowEnd) setWindowEnd(outcome.circle.windowEnd)
+        setCircleRules(outcome.circle.circleRules || '')
         setSelectedCycle(outcome.circle.currentCycle)
         setMembers(outcome.circle.members)
         if (!confirmingMemberId && outcome.circle.members[0]?.id) {
@@ -2219,6 +2223,7 @@ export default function App() {
     setCreateMembers([])
     setCreateProposedCircleId('')
     setCreatePoolAddress('')
+    setCreateCircleRules('')
     setCreateError(null)
     setCircleActivationNotice(null)
     setNewMemberName('')
@@ -2451,6 +2456,7 @@ export default function App() {
         currentCycle: 1,
         members: createMembers,
         organizerAddress: currentAccount?.address || createMembers[0]?.address,
+        ...(createCircleRules.trim() ? { circleRules: createCircleRules.trim() } : {}),
       })
       const registered = result.circle
       if (!registered?.circleId || !result.walrusBlobId) {
@@ -2469,6 +2475,7 @@ export default function App() {
       const finalTimeZone = registered.timeZone || createTimeZone
       const finalWindowStart = registered.windowStart || createWindowStart
       const finalWindowEnd = registered.windowEnd || createWindowEnd
+      const finalCircleRules = registered.circleRules || createCircleRules.trim()
 
       setCircleId(finalCircleId)
       setLookupCircleSlug(finalCircleId)
@@ -2481,6 +2488,7 @@ export default function App() {
       setTimeZone(finalTimeZone)
       setWindowStart(finalWindowStart)
       setWindowEnd(finalWindowEnd)
+      setCircleRules(finalCircleRules)
 
       setSelectedCycle(1)
       setOnchainState(null)
@@ -2516,6 +2524,7 @@ export default function App() {
       setCreateMembers([])
       setCreateProposedCircleId('')
       setCreatePoolAddress('')
+      setCreateCircleRules('')
       setNewMemberName('')
       setNewMemberAddress('')
 
@@ -2572,6 +2581,7 @@ export default function App() {
     if (selected.timeZone) setTimeZone(selected.timeZone)
     if (selected.windowStart) setWindowStart(selected.windowStart)
     if (selected.windowEnd) setWindowEnd(selected.windowEnd)
+    setCircleRules(selected.circleRules || '')
     setSelectedCycle(selected.currentCycle || 1)
     setMembers(Array.isArray(selected.members) ? selected.members : [])
     if (selected.members?.[0]?.id) setConfirmingMemberId(selected.members[0].id)
@@ -3575,6 +3585,18 @@ export default function App() {
                       </div>
                     </div>
 
+                    {circleRules.trim() && (
+                      <div className="rounded-lg border border-secondary bg-secondary/40 p-md space-y-xxs">
+                        <div className="flex items-center gap-xs text-xs font-semibold text-primary">
+                          <ShieldCheck className="size-3.5 text-brand-primary shrink-0" />
+                          <span>Circle Rules &amp; Guidelines</span>
+                        </div>
+                        <p className="text-xs text-secondary whitespace-pre-line break-words leading-relaxed">
+                          {circleRules}
+                        </p>
+                      </div>
+                    )}
+
                     <div className="flex items-start justify-between">
                       <div>
                         <span className="text-sm text-tertiary">Verified on-chain pot this cycle</span>
@@ -4341,6 +4363,69 @@ export default function App() {
                     onTimeZoneChange={setCreateTimeZone}
                     memberCount={createMembers.length || 1}
                   />
+
+                  <div className="pt-md border-t border-secondary space-y-sm">
+                    <div className="flex flex-wrap items-center justify-between gap-xs">
+                      <label htmlFor="create-circle-rules" className="text-sm font-medium text-primary">
+                        Circle Rules &amp; Guidelines{' '}
+                        <span className="text-xs font-normal text-tertiary">(Optional)</span>
+                      </label>
+                      {createCircleRules.trim() && (
+                        <button
+                          type="button"
+                          onClick={() => setCreateCircleRules('')}
+                          className="text-xs font-medium text-tertiary hover:text-primary transition-colors"
+                        >
+                          Clear
+                        </button>
+                      )}
+                    </div>
+
+                    <div className="flex flex-wrap gap-xs">
+                      {[
+                        {
+                          label: '+ Grace Window',
+                          rule: 'Members get a 48-hour grace period after the cycle due date before being marked late.',
+                        },
+                        {
+                          label: '+ Split Payments Allowed',
+                          rule: 'Split or partial payments are allowed as long as the full contribution arrives before the cycle deadline.',
+                        },
+                        {
+                          label: '+ Reminder Policy',
+                          rule: 'Send a gentle reminder 24 hours before each cycle deadline and escalate after 48 hours past due.',
+                        },
+                      ].map((preset) => (
+                        <button
+                          key={preset.label}
+                          type="button"
+                          onClick={() =>
+                            setCreateCircleRules((prev) => {
+                              const trimmed = prev.trim()
+                              if (!trimmed) return preset.rule
+                              if (trimmed.includes(preset.rule)) return prev
+                              return `${trimmed}\n${preset.rule}`
+                            })
+                          }
+                          className="px-sm py-1 rounded-full text-xs font-medium bg-secondary text-secondary hover:text-primary hover:bg-tertiary border border-secondary transition-colors"
+                        >
+                          {preset.label}
+                        </button>
+                      ))}
+                    </div>
+
+                    <textarea
+                      id="create-circle-rules"
+                      rows={3}
+                      value={createCircleRules}
+                      onChange={(e) => setCreateCircleRules(e.target.value)}
+                      placeholder="Write any grace windows, split-payment rules, emergency swap norms, or reminder guidelines for your AI Steward to remember..."
+                      className="w-full px-md py-sm rounded-lg border border-primary bg-primary text-sm text-primary focus:outline-none focus:ring-2 focus:ring-brand-primary resize-y"
+                    />
+                    <p className="text-xs text-tertiary leading-relaxed">
+                      The Move contract enforces contribution amount, token type, and fixed payout order on-chain. Written circle rules are stored in Walrus Memory as group policy so your AI Steward can cite and apply them from Cycle 1.
+                    </p>
+                  </div>
                 </div>
 
                 <div className="pt-md flex justify-end">
@@ -4743,6 +4828,14 @@ export default function App() {
                   </div>
                 ))}
               </div>
+              {createCircleRules.trim() && (
+                <div className="pt-sm border-t border-secondary space-y-xs">
+                  <p className="text-xs font-medium text-secondary">Circle Rules &amp; Guidelines</p>
+                  <p className="text-xs text-tertiary whitespace-pre-line break-words rounded-lg bg-primary border border-secondary p-sm">
+                    {createCircleRules.trim()}
+                  </p>
+                </div>
+              )}
             </div>
           </div>
 

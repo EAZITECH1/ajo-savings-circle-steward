@@ -20,7 +20,8 @@ Ajo Savings Circle Steward modernizes traditional Rotating Savings and Credit As
 | :--- | :--- | :--- | :--- |
 | **Non-Custodial Smart Contract Custody** | Move package deploying shared `Circle<phantom T>` objects. Deposits join vault balances; only the scheduled recipient can claim payouts. | `contracts/ajo/sources/ajo.move`<br/>`src/services/contractTransactions.ts` | Published Move Package on Sui Testnet:<br/>[`0x0d7dfa83d83c9187781a8acb0af9f7797bce6c157e417503fa18c04f03238466`](https://suiscan.xyz/testnet/package/0x0d7dfa83d83c9187781a8acb0af9f7797bce6c157e417503fa18c04f03238466) |
 | **Blockchain Indexing via Tatum** | Digest-first verification querying Tatum Sui Gateway GraphQL for `sender`, `owner`, `coinType`, `amount`, and `effects.timestamp`. | `server/tatum-client.mjs`<br/>`server/sui-verifier.mjs`<br/>`server/routes/tatum.mjs` | Live GraphQL inspection at `https://sui-testnet.gateway.tatum.io/graphql`. Automated test passes: `tests/verifier.test.mjs`. |
-| **Decentralized Memory via Walrus** | SEAL-encrypted semantic memory storing circle configurations, approved grace policies, and late payment behavior. | `server/walrus-memory.mjs`<br/>`server/routes/memory.mjs` | Controller Object on Sui Mainnet:<br/>[`0xf6b75c6fd44e685829e0baa04077c42c09bed658819e921126dc11ce8c3175d4`](https://suiscan.xyz/mainnet/object/0xf6b75c6fd44e685829e0baa04077c42c09bed658819e921126dc11ce8c3175d4)<br/>57 real test receipts in [WALRUS_BLOBS.md](WALRUS_BLOBS.md). |
+| **Decentralized Memory via Walrus** | SEAL-encrypted semantic memory storing `circle_config` (including optional `circleRules`), founding Circle Rules `Agreements`, 5 learning loops (grace policies, cross-cycle timeliness, split-payment patterns, reminder preferences/conversions, payout-swap guardrails), and tx associations. | `server/walrus-memory.mjs`<br/>`server/routes/memory.mjs`<br/>`server/payment-policy.mjs` | Controller Object on Sui Mainnet:<br/>[`0xf6b75c6fd44e685829e0baa04077c42c09bed658819e921126dc11ce8c3175d4`](https://suiscan.xyz/mainnet/object/0xf6b75c6fd44e685829e0baa04077c42c09bed658819e921126dc11ce8c3175d4)<br/>57 real test receipts in [WALRUS_BLOBS.md](WALRUS_BLOBS.md). |
+| **Organizer Governance & Notifications** | Non-organizer proposals require organizer signature/approval or rejection; Notification Center surfaces unread blue-dot alerts for proposals and overdue contributions; MoveAbort errors decode to human-readable guidance. | `server/walrus-memory.mjs`<br/>`server/routes/memory.mjs`<br/>`src/App.tsx` | Verified in `tests/stage2-walrus-memory.test.mjs` (organizer approval/rejection, overdue reminders, founding circle rules). |
 | **AI Governance & Citation Safeguards** | Autonomous LLM Steward that evaluates verified chain facts and server-recalled memories with Zod schema enforcement. | `server/steward-llm.mjs`<br/>`server/routes/steward.mjs` | Fails closed if Walrus recall fails. Never recommends members who already claimed. Automated test: `tests/steward.test.mjs`. |
 | **Cryptographic Address Binding & Auth** | One-time challenge nonces signed by member wallet proving key derivation for Ed25519, Secp256k1, and Passkey/zkLogin. | `server/wallet-auth.mjs` | Rejects mismatched signatures with 401/403. Automated test: `tests/wallet-auth.test.mjs`. |
 | **Zero-Loss Disaster Recovery** | Full circle state reconstruction from Walrus Mainnet + live Tatum re-verification on container restart. | `server/walrus-memory.mjs` (`restoreCircleFromWalrus`) | Validated via `tests/walrus-restart-recovery.test.mjs` and runnable via `npm run restore:walrus`. |
@@ -31,7 +32,7 @@ Ajo Savings Circle Steward modernizes traditional Rotating Savings and Credit As
 
 The project includes an extensive test suite executed via Node.js native test runner (`node --test tests/*.test.mjs`).
 
-### Actual Observed Test Run Results (58 Tests)
+### Actual Observed Test Run Results (68 Tests)
 ```text
 ✔ resolveSuiNetwork correctly maps testnet and mainnet
 ✔ isValidSuiAddress validates 0x hex addresses up to 64 chars
@@ -48,6 +49,11 @@ The project includes an extensive test suite executed via Node.js native test ru
 ✔ Payment classification: on-time, late, partial, wrong_token, wrong_amount, and split-payment aggregation
 ✔ Policy evaluation: separates chain status (Late) from grace-agreement policy outcome
 ✔ Address and CoinType normalization
+✔ Policy evaluation: parses custom grace window durations (10 minutes / 10 miniutes) and enforces cycle scope
+✔ Policy evaluation: cross-cycle timeliness trajectory compares prior historical_behavior blob with current payment
+✔ Loop 3: Multi-tranche split completion is flagged and cites prior split pattern memory
+✔ Loop 4: Opted-in reminder preference and prior conversion outcome enrich Pending and Verified evaluations
+✔ Loop 5: detectPayoutSwapAgreement detects payout-order swap agreement as advisory guardrail only
 ✔ Transaction Flows: SUI direct contribution splits from gas and transfers to vault
 ✔ Transaction Flows: Non-SUI token with single coin object splits and transfers
 ✔ Transaction Flows: Non-SUI token with multiple coin objects merges before splitting
@@ -62,6 +68,9 @@ The project includes an extensive test suite executed via Node.js native test ru
 ✔ Sui wallet signature binding: accepts matching wallet signature, rejects unrelated keypair signature, and enforces one-time challenge nonces
 ✔ Multi-scheme Sui wallet signature verification: verifies real Ed25519, Secp256k1, and Secp256r1/Passkey/zkLogin wallet signatures
 ✔ Walrus Memory: serializes and parses recalled memory with real blob_id and metadata intact
+✔ Walrus Memory: persistHistoricalLatenessToWalrus records grace resolution outcome and populates sessionConfirmedCache
+✔ Organizer approval & notifications: non-organizer agreement requires organizer signature or rejection and synthesizes overdue reminders
+✔ upsertCircleRoster & persistCircleConfigToWalrus persist circleRules and commit founding Agreements memory
 ✔ Sui digest validation: accepts Base58 32-byte digests and rejects 0x hex or short strings
 ✔ parseSuiTransactionBlock: extracts balanceChanges and rejects incomplete responses
 ✔ verifyMemberContributionOnSui: handles unconfigured Tatum, malformed digest, not_found, late + grace policy, and split payments
@@ -92,7 +101,7 @@ The project includes an extensive test suite executed via Node.js native test ru
 ✔ Schedule: circle_config with timeZone, windowStart, and windowEnd serializes, hashes, and restores idempotently
 ✔ Schedule: backward compatibility preserves older circle records without timeZone
 
-Summary: 58 tests | 57 passed | 1 skipped (testnet network call) | 0 failed
+Summary: 68 tests | 67 passed | 1 skipped (testnet network call) | 0 failed
 ```
 
 ---

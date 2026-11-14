@@ -54,11 +54,11 @@ flowchart TD
 | Component | Files / Modules | Primary Responsibility | Custody / Authority Boundary |
 | :--- | :--- | :--- | :--- |
 | **Move Smart Contracts** | `contracts/ajo/sources/ajo.move` | Governs shared vault pools (`Circle<T>`), deposits (`contribute`), claims (`claim_cycle`), member acceptances, and on-chain deadlines. | **Exclusive Custodian:** Only the Move contract logic and scheduled recipient can release funds from the vault. |
-| **Client UI & dApp-Kit** | `src/App.tsx`<br/>`src/dapp-kit.ts`<br/>`src/services/contractTransactions.ts` | Displays active circle board, cycle countdowns, and triggers wallet signing. | **Non-Custodial:** Never holds private keys. All transactions are user-approved via browser wallet extension. |
+| **Client UI & dApp-Kit** | `src/App.tsx`<br/>`src/dapp-kit.ts`<br/>`src/services/contractTransactions.ts` | Displays active circle board, cycle countdowns, optional Circle Rules & Guidelines, Notification Center (unread dot & overdue reminders), MoveAbort error decoding, and triggers wallet signing. | **Non-Custodial:** Never holds private keys. All transactions are user-approved via browser wallet extension. |
 | **Wallet Authentication** | `server/wallet-auth.mjs`<br/>`server/routes/*.mjs` | Verifies cryptographic signatures on server-issued challenge nonces before granting access to sensitive routes. | **Anti-Impersonation:** Verifies that caller controls the claimed Sui address (Ed25519, Secp256k1, Secp256r1/zkLogin). |
 | **Tatum Sui Verifier** | `server/tatum-client.mjs`<br/>`server/sui-verifier.mjs` | Queries Tatum Sui Gateway to inspect transaction digests, net balance changes, sender, recipient, coinType, and execution status. | **Evidence Only:** Tatum provides blockchain indexing and inspection; it cannot sign transactions or move funds. |
 | **Policy Engine** | `server/payment-policy.mjs` | Strictly separates immutable chain facts (`Verified`, `Late`, `Partial`, `Unverified`) from group agreement policies (approved grace periods). | **Rule Evaluation:** Evaluates whether an on-chain late payment is excused under an approved Walrus memory record. |
-| **Walrus Memory Bridge** | `server/walrus-memory.mjs` | Manages semantic memory persistence, client pooling, 429 exponential backoff retries, and disaster recovery via `@mysten-incubation/memwal`. | **Decentralized Audit Log:** Stores SEAL-encrypted agreements and lateness logs. Never modifies contract state. |
+| **Walrus Memory Bridge** | `server/walrus-memory.mjs` | Manages semantic memory persistence (including founding circle rules, 5 learning loops, and organizer approval/rejection), client pooling, 429 exponential backoff retries, and disaster recovery via `@mysten-incubation/memwal`. | **Decentralized Audit Log:** Stores SEAL-encrypted agreements and lateness logs. Never modifies contract state. |
 | **Advisory AI Steward** | `server/steward-llm.mjs` | Evaluates server-verified chain facts and recalled memories to recommend payout order and answer member queries. | **Advisory Only:** Output is strictly non-binding and validated against rigid Zod schemas. |
 
 ---
@@ -197,11 +197,16 @@ ajo-circle:<circleId>
 All read (`recall`, `listMemories`) and write (`rememberAndWait`) operations are strictly scoped to this namespace.
 
 ### Data Types Persisted
-1. **`circle_config`**: Versioned circle roster, vault object ID, contribution amount, cycle length, time zone, and hash chain.
-2. **`agreement`**: Group decisions (e.g., approved grace period exceptions, emergency payouts) with proposal hashes and member signatures.
-3. **`member_pattern`**: Recorded operational habits (e.g., preferred notification channel, split-payment arrangements).
-4. **`historical_behavior`**: Factual records of verified late contributions, documenting payment timestamps without imposing automatic penalties.
-5. **`tx_digest_association`**: Cryptographic binding of confirmed Sui transaction digests to circle cycles.
+1. **`circle_config`**: Versioned circle roster, vault object ID, contribution amount, cycle length, time zone, optional `circleRules`, and hash chain.
+2. **`agreement`**: Group decisions (founding Circle Rules & Guidelines committed at circle creation, approved grace period exceptions, payout-order swap guardrails) with proposal hashes and organizer/member signatures.
+3. **`member_pattern`**: Recorded operational habits (e.g., multi-tranche split-payment arrangements).
+4. **`reminder_preference`**: Opted-in member reminder preferences and factual reminder conversion outcomes.
+5. **`historical_behavior`**: Factual records of verified late contributions, grace-window outcomes, and split-payment completions, documenting payment timestamps without imposing automatic penalties.
+6. **`tx_digest_association`**: Cryptographic binding of confirmed Sui transaction digests to circle cycles.
+
+### Founding Circle Rules & Organizer Governance
+* **On-Chain vs. Walrus Scope:** The Move contract (`ajo::circle`) enforces contribution amount, coin type, and fixed `payout_order` on-chain. Optional **Circle Rules & Guidelines** entered during Step 1 of Create Circle are stored in `circle_config` and automatically committed as a founding `Agreements` record (`Founding Circle Rules & Guidelines`) in Walrus Memory so the AI Steward and policy engine can recall and cite them from Cycle 1.
+* **Organizer Approval & Notifications:** Proposals submitted by non-organizer members remain `pending_confirmation` until the organizer approves (signing to commit to Walrus) or rejects them. Both outcomes and overdue contribution alerts surface in the in-app Notification Center.
 
 ### SEAL Encryption & Relayer Caching
 * **Threshold Encryption:** All content payloads written to Walrus are encrypted client-side using SEAL threshold identity-based encryption before storing raw blobs on Walrus Mainnet.

@@ -263,6 +263,9 @@ export function computeCircleConfigHash(circleData) {
   if (circleData?.windowEnd && String(circleData.windowEnd).trim()) {
     canonicalObj.windowEnd = String(circleData.windowEnd).trim()
   }
+  if (circleData?.circleRules && String(circleData.circleRules).trim()) {
+    canonicalObj.circleRules = String(circleData.circleRules).trim()
+  }
 
   const canonical = JSON.stringify(canonicalObj)
 
@@ -393,6 +396,13 @@ export function upsertCircleRoster(circleData, options = {}) {
     ...(circleData.timeZone ? { timeZone: String(circleData.timeZone).trim() } : existing?.timeZone ? { timeZone: existing.timeZone } : {}),
     ...(circleData.windowStart ? { windowStart: String(circleData.windowStart).trim() } : existing?.windowStart ? { windowStart: existing.windowStart } : {}),
     ...(circleData.windowEnd ? { windowEnd: String(circleData.windowEnd).trim() } : existing?.windowEnd ? { windowEnd: existing.windowEnd } : {}),
+    ...(circleData.circleRules !== undefined
+      ? String(circleData.circleRules).trim()
+        ? { circleRules: String(circleData.circleRules).trim() }
+        : {}
+      : existing?.circleRules
+      ? { circleRules: existing.circleRules }
+      : {}),
   }
 
   const nextConfigHash = computeCircleConfigHash(nextCore)
@@ -727,6 +737,9 @@ export function serializeCircleConfigForWalrus(circle, approvalMeta = {}) {
     ...(circle.timeZone ? { timeZone: String(circle.timeZone).trim() } : {}),
     ...(circle.windowStart ? { windowStart: String(circle.windowStart).trim() } : {}),
     ...(circle.windowEnd ? { windowEnd: String(circle.windowEnd).trim() } : {}),
+    ...(circle.circleRules && String(circle.circleRules).trim()
+      ? { circleRules: String(circle.circleRules).trim() }
+      : {}),
   }
   const configHash = computeCircleConfigHash(circleConfig)
   const previousConfigHash =
@@ -1022,6 +1035,9 @@ export function validateWalrusRecordForRestore(hit, expectedCircleId) {
       ...(cfg.timeZone ? { timeZone: String(cfg.timeZone).trim() } : {}),
       ...(cfg.windowStart ? { windowStart: String(cfg.windowStart).trim() } : {}),
       ...(cfg.windowEnd ? { windowEnd: String(cfg.windowEnd).trim() } : {}),
+      ...(cfg.circleRules && String(cfg.circleRules).trim()
+        ? { circleRules: String(cfg.circleRules).trim() }
+        : {}),
     }
 
     const computedHash = computeCircleConfigHash(normalizedConfig)
@@ -1738,11 +1754,64 @@ export async function persistCircleConfigToWalrus(input, env = process.env) {
       walrusConfigBlobId: rememberResult.blob_id,
       updatedAt: new Date().toISOString(),
     }
+
+    let foundingRulesBlobId
+    const trimmedRules = String(circle.circleRules || '').trim()
+    if (trimmedRules && version === 1) {
+      const rulesRecordId = `mem-rules-${circle.circleId}-v${version}`
+      const rulesDraft = {
+        id: rulesRecordId,
+        circleId: circle.circleId,
+        memoryType: 'agreement',
+        category: 'Agreements',
+        version: 1,
+        title: 'Founding Circle Rules & Guidelines',
+        sentence: `Organizer-defined circle rules for ${circle.circleName}: ${trimmedRules}`,
+        quote: trimmedRules,
+        context: `Founding circle rules entered at circle creation for ${circle.circleName} (${circle.circleId}). Move contract parameters (amount, token, fixed payout order) remain enforced on-chain.`,
+        cycle: Number(circle.currentCycle) || 1,
+        date: new Date().toISOString().slice(0, 10),
+        memberIds: [],
+        confirmedBy: confirmedByLabel,
+        confirmedByList: [confirmedByLabel],
+        confirmationType,
+        confirmingAddress: normalizedMemberAddr,
+        proposalHash: configHash,
+      }
+      const serializedRules = serializeMemoryForWalrus(rulesDraft)
+      const rulesResult = await withWalrusRetry(() =>
+        client.rememberAndWait(serializedRules, namespace, {
+          pollIntervalMs: tunables.pollingIntervalMs,
+          timeoutMs: Math.max(tunables.requestTimeoutMs * 4, 90000),
+          idempotencyKey: `${circle.circleId}:founding_rules:${configHash}`,
+          dedupe: true,
+        })
+      )
+      if (rulesResult?.blob_id) {
+        foundingRulesBlobId = rulesResult.blob_id
+        updatedCircle.foundingRulesBlobId = foundingRulesBlobId
+        const savedRulesRecord = {
+          ...rulesDraft,
+          id: rulesResult.id || rulesRecordId,
+          jobId: rulesResult.job_id || rulesResult.id,
+          walrusBlobId: foundingRulesBlobId,
+          namespace: rulesResult.namespace || namespace,
+          owner: rulesResult.owner,
+          createdAt: new Date().toISOString(),
+        }
+        if (!sessionConfirmedCache.has(namespace)) {
+          sessionConfirmedCache.set(namespace, new Map())
+        }
+        sessionConfirmedCache.get(namespace).set(foundingRulesBlobId, savedRulesRecord)
+      }
+    }
+
     circleRegistry.set(circle.circleId, updatedCircle)
 
     return {
       circle: updatedCircle,
       walrusBlobId: rememberResult.blob_id,
+      ...(foundingRulesBlobId ? { foundingRulesBlobId } : {}),
       namespace: rememberResult.namespace || namespace,
       version,
       configHash,
