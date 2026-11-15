@@ -29,13 +29,13 @@ export const StewardChatLlmSchema = z.object({
       title: z.string().trim().min(1),
       quote: z.string().trim().min(1),
       suggestedAction: z.string().trim().min(1),
-      memberId: z.string().optional(),
+      memberId: z.string().nullable().optional(),
     })
     .nullable()
     .optional(),
   riskAssessment: z
     .object({
-      memberId: z.string().trim().min(1),
+      memberId: z.string().nullable().optional(),
       riskLevel: z.enum(['Zero Risk', 'Low Risk', 'Moderate Risk', 'High Risk']),
       note: z.string().trim().min(1),
     })
@@ -447,17 +447,26 @@ export async function runStewardChat(input, options = {}) {
       proposedMemory = {
         id: `prop-${crypto.randomUUID()}`,
         ...validated.proposedMemory,
+        memberId: validated.proposedMemory.memberId || undefined,
         cycle: currentCycle,
       }
     }
   }
+
+  const normalizedRiskAssessment =
+    validated.riskAssessment && validated.riskAssessment.memberId
+      ? {
+          ...validated.riskAssessment,
+          memberId: validated.riskAssessment.memberId.trim(),
+        }
+      : undefined
 
   return {
     reply: validated.reply,
     proposedMemory,
     citedMemories,
     citedTxDigests,
-    riskAssessment: validated.riskAssessment || undefined,
+    riskAssessment: normalizedRiskAssessment,
   }
 }
 
