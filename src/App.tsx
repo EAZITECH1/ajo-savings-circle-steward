@@ -2200,6 +2200,10 @@ export default function App() {
       return
     }
     setMemoryError(null)
+    const effectiveMemberId =
+      connectedMember && !isConnectedOrganizer
+        ? connectedMember.id
+        : manualMemberId || undefined
     try {
       const prop = await memoryStore.propose({
         circleId,
@@ -2207,7 +2211,7 @@ export default function App() {
         title: manualTitle.trim(),
         quote: manualQuote.trim(),
         suggestedAction: manualRule.trim() || manualTitle.trim(),
-        memberId: manualMemberId || undefined,
+        memberId: effectiveMemberId,
         cycle: selectedCycle,
       })
       setProposedMemory(prop)
@@ -5674,18 +5678,30 @@ export default function App() {
                   </label>
                   <label className="space-y-xxs block">
                     <span className="text-[11px] font-medium text-secondary">Applies to</span>
-                    <select
-                      value={manualMemberId}
-                      onChange={(e) => setManualMemberId(e.target.value)}
-                      className="w-full rounded-md bg-primary px-lg py-md text-xs text-primary border border-primary focus-visible:ring-2 focus-visible:ring-focus-ring"
-                    >
-                      <option value="">All members (Circle-wide)</option>
-                      {members.map((m) => (
-                        <option key={m.id} value={m.id}>
-                          {m.name} ({m.id})
-                        </option>
-                      ))}
-                    </select>
+                    {connectedMember && !isConnectedOrganizer ? (
+                      <div
+                        className="w-full rounded-md bg-secondary/70 px-lg py-md text-xs font-medium text-secondary border border-secondary flex items-center justify-between gap-xs cursor-not-allowed select-none"
+                        title="Proposals from a member wallet are scoped to your own member profile"
+                      >
+                        <span className="truncate">
+                          {connectedMember.name} ({connectedMember.id})
+                        </span>
+                        <Lock className="size-3.5 text-fg-quaternary shrink-0" />
+                      </div>
+                    ) : (
+                      <select
+                        value={manualMemberId}
+                        onChange={(e) => setManualMemberId(e.target.value)}
+                        className="w-full rounded-md bg-primary px-lg py-md text-xs text-primary border border-primary focus-visible:ring-2 focus-visible:ring-focus-ring"
+                      >
+                        <option value="">All members (Circle-wide)</option>
+                        {members.map((m) => (
+                          <option key={m.id} value={m.id}>
+                            {m.name} ({m.id})
+                          </option>
+                        ))}
+                      </select>
+                    )}
                   </label>
                 </div>
 
