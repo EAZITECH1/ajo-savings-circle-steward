@@ -4695,7 +4695,7 @@ export default function App() {
                   <div className="flex justify-between pb-xs border-b border-secondary">
                     <span className="text-tertiary">Total pot per cycle</span>
                     <span className="font-semibold text-brand-primary tabular-nums">
-                      {(createContributionPerMember * (createMembers.length || 1)).toLocaleString()} {findTokenByCoinType(createTokenType, explorerNetwork)?.symbol || 'SUI'}
+                      {Number((createContributionPerMember * (createMembers.length || 1)).toFixed(9)).toLocaleString()} {findTokenByCoinType(createTokenType, explorerNetwork)?.symbol || 'SUI'}
                     </span>
                   </div>
                   <div className="flex justify-between pb-xs border-b border-secondary">
@@ -4887,7 +4887,7 @@ export default function App() {
                 <div className="flex items-center gap-xs mt-xxs">
                   <TokenLogo symbol={findTokenByCoinType(createTokenType, explorerNetwork)?.symbol || 'SUI'} className="size-4 shrink-0" />
                   <p className="text-base font-semibold text-brand-primary tabular-nums">
-                    {createContributionPerMember * (createMembers.length || 1)} {findTokenByCoinType(createTokenType, explorerNetwork)?.symbol || 'SUI'}
+                    {Number((createContributionPerMember * (createMembers.length || 1)).toFixed(9)).toLocaleString()} {findTokenByCoinType(createTokenType, explorerNetwork)?.symbol || 'SUI'}
                   </p>
                 </div>
               </div>
@@ -4910,10 +4910,17 @@ export default function App() {
                   {formatLocalDateTimeWithZone(createWindowStart, createTimeZone, 'short')}
                 </span>
               </div>
-              <div className="flex items-center justify-between text-xs text-secondary">
-                <span>Pool vault</span>
-                <span className="font-mono text-xs text-primary truncate max-w-[140px]" title={createPoolAddress}>
-                  {createPoolAddress ? `${createPoolAddress.slice(0, 6)}...${createPoolAddress.slice(-4)}` : 'Pending vault deployment'}
+              <div className="flex items-center justify-between gap-sm text-xs text-secondary">
+                <span className="shrink-0">Pool vault</span>
+                <span
+                  className={
+                    createPoolAddress
+                      ? 'font-mono text-xs text-primary truncate max-w-[140px]'
+                      : 'text-xs font-medium text-tertiary text-right'
+                  }
+                  title={createPoolAddress || 'Pending vault deployment'}
+                >
+                  {createPoolAddress ? `${createPoolAddress.slice(0, 6)}...${createPoolAddress.slice(-4)}` : 'Pending deployment'}
                 </span>
               </div>
             </div>
