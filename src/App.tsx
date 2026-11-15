@@ -1867,10 +1867,10 @@ export default function App() {
       )
       return
     }
-    if (prop.memberId && prop.memberId !== matchedMember.id) {
+    if (prop.memberId && prop.memberId !== matchedMember.id && !isConnectedOrganizer) {
       const targetName = members.find((m) => m.id === prop.memberId)?.name || prop.memberId
       setMemoryError(
-        `Authorization error: This proposal specifically pertains to ${targetName}. Only ${targetName} can record this entry.`
+        `Authorization error: This proposal specifically pertains to ${targetName}. Only ${targetName} or the circle organizer can record this entry.`
       )
       return
     }
@@ -5105,9 +5105,9 @@ export default function App() {
                           {connectedMember.name} ({connectedMember.address.slice(0, 6)}...{connectedMember.address.slice(-4)})
                         </span>
                       </div>
-                      {proposedMemory.memberId && proposedMemory.memberId !== connectedMember.id && (
+                      {proposedMemory.memberId && proposedMemory.memberId !== connectedMember.id && !isConnectedOrganizer && (
                         <div className="p-xs rounded-md bg-utility-warning-50 border border-utility-warning-200 text-utility-warning-700 text-xs mt-xxs">
-                          ⚠️ This proposal specifically pertains to {members.find((m) => m.id === proposedMemory.memberId)?.name || proposedMemory.memberId}. Only their wallet can sign it.
+                          ⚠️ This proposal specifically pertains to {members.find((m) => m.id === proposedMemory.memberId)?.name || proposedMemory.memberId}. Only their wallet or the circle organizer can sign it.
                         </div>
                       )}
                     </div>
@@ -5135,7 +5135,12 @@ export default function App() {
                         isMemoryWriting ||
                         !memwalHealth.configured ||
                         Boolean(currentAccount && !connectedMember) ||
-                        Boolean(proposedMemory.memberId && connectedMember && proposedMemory.memberId !== connectedMember.id)
+                        Boolean(
+                          proposedMemory.memberId &&
+                            connectedMember &&
+                            proposedMemory.memberId !== connectedMember.id &&
+                            !isConnectedOrganizer
+                        )
                       }
                       className="inline-flex items-center gap-sm rounded-lg border border-transparent bg-brand-solid px-lg py-sm text-xs font-semibold text-primary-on-brand shadow-xs hover:bg-brand-solid-hover disabled:opacity-50"
                     >
@@ -5147,7 +5152,9 @@ export default function App() {
                           ? 'Connect Wallet to Sign Memory'
                           : !connectedMember
                           ? 'Wallet Not Registered'
-                          : proposedMemory.memberId && proposedMemory.memberId !== connectedMember.id
+                          : proposedMemory.memberId &&
+                            proposedMemory.memberId !== connectedMember.id &&
+                            !isConnectedOrganizer
                           ? 'Not Your Proposal to Sign'
                           : 'Sign with Wallet & Write to Walrus'}
                       </span>
@@ -5159,7 +5166,11 @@ export default function App() {
                         isMemoryWriting ||
                         !memwalHealth.configured ||
                         !connectedMember ||
-                        Boolean(proposedMemory.memberId && proposedMemory.memberId !== connectedMember.id)
+                        Boolean(
+                          proposedMemory.memberId &&
+                            proposedMemory.memberId !== connectedMember.id &&
+                            !isConnectedOrganizer
+                        )
                       }
                       className="inline-flex items-center gap-sm rounded-lg bg-primary px-md py-sm text-xs font-semibold text-secondary border border-primary shadow-xs hover:bg-primary-hover disabled:opacity-50"
                       title="Organizer-entered record (distinct from member-signed confirmation)"
@@ -5778,7 +5789,8 @@ export default function App() {
                             !proposedMemory.requiresOrganizerApproval &&
                               proposedMemory.memberId &&
                               connectedMember &&
-                              proposedMemory.memberId !== connectedMember.id
+                              proposedMemory.memberId !== connectedMember.id &&
+                              !isConnectedOrganizer
                           )
                         }
                         className="inline-flex items-center gap-xs rounded-lg bg-brand-solid px-xl py-md text-xs font-semibold text-primary-on-brand shadow-xs disabled:opacity-50 hover:bg-brand-solid-hover"
@@ -5795,7 +5807,8 @@ export default function App() {
                             ? 'Awaiting Organizer Signature in Chat'
                             : !proposedMemory.requiresOrganizerApproval &&
                               proposedMemory.memberId &&
-                              proposedMemory.memberId !== connectedMember.id
+                              proposedMemory.memberId !== connectedMember.id &&
+                              !isConnectedOrganizer
                             ? 'Not Your Proposal to Sign'
                             : 'Sign with Wallet & Write to Walrus'}
                         </span>
@@ -5807,7 +5820,11 @@ export default function App() {
                           isMemoryWriting ||
                           !memwalHealth.configured ||
                           !connectedMember ||
-                          Boolean(proposedMemory.memberId && proposedMemory.memberId !== connectedMember.id)
+                          Boolean(
+                            proposedMemory.memberId &&
+                              proposedMemory.memberId !== connectedMember.id &&
+                              !isConnectedOrganizer
+                          )
                         }
                         className="inline-flex items-center gap-xs rounded-lg bg-primary px-lg py-md text-xs font-semibold text-secondary border border-primary disabled:opacity-50"
                       >

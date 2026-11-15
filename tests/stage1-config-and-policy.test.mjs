@@ -601,3 +601,35 @@ test('Loop 5: detectPayoutSwapAgreement detects payout-order swap agreement as a
 
   assert.equal(detectPayoutSwapAgreement([], { cycle: 2, scheduledRecipientName: 'Daniel' }), null)
 })
+
+test('Policy evaluation: circle-wide grace agreement (no memberId) excuses member late payment within cycle window', () => {
+  const circleWideGrace = {
+    id: 'mem_grace_c3_wide',
+    walrusBlobId: 'QVkNIZ_circle_wide_c3',
+    category: 'Agreements',
+    memoryType: 'agreement',
+    title: '10 Minutes Grace Window for Cycle 3',
+    quote: 'Group agreed to allow a 10 minutes grace window for Cycle 3 contributions without marking as unexcused.',
+    cycle: 3,
+  }
+  const windowEnd = '2026-11-15T12:00:00.000Z'
+  const within10Min = '2026-11-15T12:06:00.000Z'
+
+  const excused = evaluateContributionPolicy(
+    { status: 'Late', code: 'late', timestamp: within10Min, txDigest: '5DgpWsTxC3', amountReceived: 0.1 },
+    {
+      withMemory: true,
+      windowEnd,
+      memories: [circleWideGrace],
+      memberId: 'm2',
+      memberName: 'Emmanuel',
+      cycle: 3,
+    }
+  )
+
+  assert.equal(excused.chainStatus, 'Late')
+  assert.equal(excused.policyStatus, 'Accepted under recorded grace agreement')
+  assert.equal(excused.policyVerdict, 'excused_by_agreement')
+  assert.equal(excused.countsTowardPot, true)
+  assert.equal(excused.citedMemory?.walrusBlobId, 'QVkNIZ_circle_wide_c3')
+})

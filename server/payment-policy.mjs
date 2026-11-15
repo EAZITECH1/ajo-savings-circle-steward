@@ -527,7 +527,13 @@ export function evaluateContributionPolicy(chainResult, options) {
   const windowEndMs = typeof windowEnd === 'number' ? windowEnd : Date.parse(windowEnd)
   const currentCycleNum = Number(cycle) > 0 ? Number(cycle) : null
 
-  // Helper to match memories relevant to this member (excluding any quarantined synthetic blobs)
+  // Helper to match memories relevant to this member (including circle-wide Agreements,
+  // while excluding any quarantined synthetic blobs)
+  const isCircleWideAgreement = (m) =>
+    m.category === 'Agreements' &&
+    !m.memberId &&
+    (!Array.isArray(m.memberIds) || m.memberIds.length === 0)
+
   const memberMemories = withMemory
     ? memories.filter((m) => {
         if (isQuarantinedSyntheticRecord(m)) return false
@@ -542,6 +548,7 @@ export function evaluateContributionPolicy(chainResult, options) {
             return true
           }
         }
+        if (isCircleWideAgreement(m)) return true
         return false
       })
     : []
@@ -667,7 +674,7 @@ export function evaluateContributionPolicy(chainResult, options) {
   }
 
   if (chainStatus === 'Late') {
-    const graceMemory = memberMemories.find((m) => {
+    const matchingGraceMemories = memberMemories.filter((m) => {
       if (m.category !== 'Agreements') return false
       const text = `${m.title || ''} ${m.quote || ''}`.toLowerCase()
       if (!text.includes('grace') && !text.includes('late')) return false
@@ -677,6 +684,10 @@ export function evaluateContributionPolicy(chainResult, options) {
       }
       return true
     })
+    // Prefer member-specific grace agreement; fall back to circle-wide grace agreement
+    const graceMemory =
+      matchingGraceMemories.find((m) => !isCircleWideAgreement(m)) ||
+      matchingGraceMemories[0]
 
     const graceMeta = parseGraceAgreementMeta(graceMemory, graceWindowHours)
     const paymentTimeMs = chainResult.timestamp ? Date.parse(chainResult.timestamp) : NaN
