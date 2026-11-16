@@ -6,11 +6,16 @@ This guide provides hackathon judges with an evidence-backed verification path f
 
 ## 1. Executive Summary
 
+**Track:** Consumer Finance Apps (Total Recall — Tatum × Walrus Memory Hackathon)
+
 Ajo Savings Circle Steward modernizes traditional Rotating Savings and Credit Associations (ROSCAs / Ajo / Esusu / Tandas) by solving the fundamental problems of organizer burnout, default disputes, and custody risk:
 * **Non-Custodial Move Vaults:** Funds sit in dedicated, shared Move objects (`Circle<T>`) on **Sui Testnet**.
 * **Authoritative On-Chain Verification:** **Tatum Sui Gateway** cryptographically checks transaction blocks, net balance changes, coin types, and timestamps against cycle deadlines.
 * **Decentralized Long-Term Memory:** **Walrus Memory** (`@mysten-incubation/memwal` on **Walrus Mainnet**) stores member agreements, approved grace periods, and lateness records under isolated namespaces.
 * **Advisory AI Steward:** Impartial LLM assistant reasons over server-verified chain facts and recalled memories to recommend payout orders without ever possessing withdrawal authority.
+
+### Why Walrus Memory vs. a Normal Database (The Trade-Off)
+Replacing Walrus Memory with Postgres would make queries faster and simpler, **but it would leave the organizer in unilateral control of the group's memory.** In a savings circle dispute, an organizer who owns the server could quietly alter or delete a past grace agreement. Using Walrus Memory trades a small amount of recall latency for **tamper-evident, wallet-signed agreements and verifiable blob receipts**—ensuring neither the organizer nor any member can rewrite what was agreed, while allowing full circle state recovery (`restoreCircleFromWalrus`) if the app server ever restarts.
 
 ---
 

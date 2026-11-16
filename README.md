@@ -55,6 +55,14 @@ Traditional rotating savings associations rely entirely on interpersonal trust a
 
 Ajo Steward integrates **Walrus Memory** (`@mysten-incubation/memwal`) on **Walrus Mainnet** to provide decentralized, tamper-proof long-term memory for community governance without relying on a centralized Web2 database.
 
+### Why Walrus Memory vs. a Normal Database (The Trade-Off)
+If we replaced Walrus Memory with a traditional database like Postgres, reads and writes would be faster and simpler—**but the core trust problem in a savings circle would remain unsolved.** Whoever hosts or administers a centralized database (typically the circle organizer) could silently edit, delete, or deny a previously approved grace window after a dispute, or lose the group's agreed history if the server goes down.
+
+We accept the trade-off of slightly higher recall latency and explicit write/recall boundaries in exchange for **shared, tamper-evident group memory**:
+* **No silent history rewrites:** Wallet-signed grace agreements, founding circle rules, and factual payment outcomes are committed to Walrus Mainnet with verifiable blob IDs that neither the organizer nor a member can alter after the fact.
+* **Impartial AI context:** The Steward only reasons over server-verified Tatum chain facts and Walrus-recalled blobs—citing the exact blob IDs and Sui transaction digests so any member can audit why a late payment was marked excused or unexcused.
+* **Server-independent recovery:** If the app server restarts or moves, `restoreCircleFromWalrus` reconstructs the circle's rules, agreements, and transaction associations directly from Walrus Mainnet and Tatum.
+
 ### What Ajo Steward Stores in Walrus
 Every record is stored under an isolated namespace (`ajo-circle:<circleId>`) using the `schema: 'ajo-steward-memory/v2'` format:
 1. **`circle_config`**: The immutable, versioned configuration of the circle, including Move vault object ID, token type, cadence, time zone, optional `circleRules`, and hash chain.
