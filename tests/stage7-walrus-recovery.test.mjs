@@ -264,31 +264,34 @@ test('Walrus Restart Recovery: persists circle_config, member-signed agreement, 
   )
   assert.equal(getCircleRoster(circleId), null)
 
-  // 6. Member 2 restores the circle; mock Tatum RPC returns a late transfer (30h after windowEnd, within 72h grace)
-  let tatumRpcCalls = 0
-  const mockTatumRpc = async (_chain, body) => {
-    tatumRpcCalls++
-    assert.equal(body.method, 'sui_getTransactionBlock')
-    assert.equal(body.params[0], VALID_DIGEST_A)
+  // 6. Member 2 restores the circle; mock Tatum GraphQL returns a late transfer (30h after windowEnd, within 72h grace)
+  let tatumGraphqlCalls = 0
+  const mockTatumGraphql = async (_chain, _query, variables) => {
+    tatumGraphqlCalls++
+    assert.equal(variables.digest, VALID_DIGEST_A)
     return {
       ok: true,
       status: 200,
       async json() {
         return {
-          jsonrpc: '2.0',
-          id: 1,
-          result: {
-            digest: VALID_DIGEST_A,
-            timestampMs: String(Date.parse('2026-09-03T06:00:00Z')), // 30h after windowEnd
-            transaction: { data: { sender: addrMem2 } },
-            effects: { status: { status: 'success' } },
-            balanceChanges: [
-              {
-                owner: { AddressOwner: poolAddr },
-                coinType: '0x2::sui::SUI',
-                amount: '500000000000',
+          data: {
+            transaction: {
+              digest: VALID_DIGEST_A,
+              sender: { address: addrMem2 },
+              effects: {
+                status: 'SUCCESS',
+                timestamp: '2026-09-03T06:00:00Z', // 30h after windowEnd
+                balanceChanges: {
+                  nodes: [
+                    {
+                      owner: { address: poolAddr },
+                      coinType: { repr: '0x2::sui::SUI' },
+                      amount: '500000000000',
+                    },
+                  ],
+                },
               },
-            ],
+            },
           },
         }
       },
@@ -302,7 +305,7 @@ test('Walrus Restart Recovery: persists circle_config, member-signed agreement, 
       windowStart: '2026-09-01T00:00:00Z',
       windowEnd: '2026-09-01T23:59:59Z',
       memwalClientOverride: mockStore.createClient(),
-      fetchRpc: mockTatumRpc,
+      fetchGraphql: mockTatumGraphql,
     },
     TEST_ENV
   )
@@ -313,7 +316,7 @@ test('Walrus Restart Recovery: persists circle_config, member-signed agreement, 
   assert.equal(restoreReport.missingBlobIds.length, 0)
   assert.equal(restoreReport.missingFields.length, 0)
   assert.equal(restoreReport.malformedRecords.length, 0)
-  assert.equal(tatumRpcCalls, 1)
+  assert.equal(tatumGraphqlCalls, 1)
 
   // Verify reconstructed circle configuration & roster in memory
   const rebuiltCircle = getCircleRoster(circleId)
@@ -342,7 +345,7 @@ test('Walrus Restart Recovery: persists circle_config, member-signed agreement, 
       windowStart: '2026-09-01T00:00:00Z',
       windowEnd: '2026-09-01T23:59:59Z',
       memwalClientOverride: mockStore.createClient(),
-      fetchRpc: mockTatumRpc,
+      fetchGraphql: mockTatumGraphql,
     },
     TEST_ENV
   )
@@ -518,7 +521,7 @@ test('Walrus Restart Recovery: detects incomplete recall (missingBlobIds / trunc
         extraInventoryBlobIds: ['blob_unrecalled_99'],
       }),
       // Simulate Tatum outage during re-verification
-      fetchRpc: async () => {
+      fetchGraphql: async () => {
         throw new Error('Tatum gateway 503 Service Unavailable')
       },
     },

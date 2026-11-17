@@ -351,6 +351,25 @@ export function upsertCircleRoster(circleData, options = {}) {
           403
         )
       }
+      if (!isExistingOrganizer) {
+        const existingMemberAddrs = new Set(existing.members.map((m) => normalizeSuiAddress(m.address)))
+        const nextMemberAddrs = new Set(normalizedMembers.map((m) => normalizeSuiAddress(m.address)))
+        const membersChanged =
+          existingMemberAddrs.size !== nextMemberAddrs.size ||
+          [...existingMemberAddrs].some((addr) => !nextMemberAddrs.has(addr))
+        const poolChanged =
+          normalizeSuiAddress(existing.poolAddress || '') !== normalizeSuiAddress(poolAddress || '')
+        const amountChanged =
+          Number(existing.contributionPerMember || 0) !== Number(contributionPerMember || 0)
+        const tokenChanged =
+          String(existing.tokenType || '').trim() !== String(tokenType || '').trim()
+        if (membersChanged || poolChanged || amountChanged || tokenChanged) {
+          throw new WalletAuthError(
+            `Authorization failed: only the circle organizer can modify escrow parameters or membership for "${trimmedCircleId}".`,
+            403
+          )
+        }
+      }
     }
 
     const isInNewRoster = normalizedMembers.some(
@@ -3031,7 +3050,6 @@ export async function restoreCircleFromWalrus(circleId, options = {}, env = proc
           },
           {
             env,
-            fetchRpc: options.fetchRpc,
             fetchGraphql: options.fetchGraphql,
           }
         )

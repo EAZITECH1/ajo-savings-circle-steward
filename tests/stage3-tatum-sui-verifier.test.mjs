@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
   isValidSuiDigest,
-  parseSuiTransactionBlock,
+  parseSuiGraphqlTransaction,
   verifyMemberContributionOnSui,
   clearSubmittedDigests,
 } from '../server/sui-verifier.mjs'
@@ -38,39 +38,43 @@ test('Sui digest validation: accepts Base58 32-byte digests and rejects 0x hex o
   assert.equal(isValidSuiDigest(''), false)
 })
 
-test('parseSuiTransactionBlock: extracts balanceChanges and rejects incomplete responses', () => {
-  const incomplete = parseSuiTransactionBlock(
+test('parseSuiGraphqlTransaction: extracts balanceChanges and rejects incomplete responses', () => {
+  const incomplete = parseSuiGraphqlTransaction(
     VALID_DIGEST_1,
     {
-      transaction: { data: { sender: '0x1111' } },
-      effects: { status: { status: 'success' } },
-      // missing balanceChanges and timestampMs
+      sender: { address: '0x1111' },
+      effects: { status: 'SUCCESS' },
+      // missing effects.balanceChanges.nodes and effects.timestamp
     },
     '0x2222',
     9
   )
   assert.equal(incomplete.lookupStatus, 'incomplete_fields')
-  assert.ok(incomplete.lookupError.includes('balanceChanges'))
+  assert.ok(incomplete.lookupError.includes('effects.balanceChanges.nodes'))
 
-  const validBlock = parseSuiTransactionBlock(
+  const validBlock = parseSuiGraphqlTransaction(
     VALID_DIGEST_1,
     {
       digest: VALID_DIGEST_1,
-      timestampMs: String(Date.parse('2026-09-01T12:00:00Z')),
-      transaction: { data: { sender: '0x0002' } },
-      effects: { status: { status: 'success' } },
-      balanceChanges: [
-        {
-          owner: { AddressOwner: '0x0002' },
-          coinType: '0x2::sui::SUI',
-          amount: '-500000000000',
+      sender: { address: '0x0002' },
+      effects: {
+        status: 'SUCCESS',
+        timestamp: '2026-09-01T12:00:00Z',
+        balanceChanges: {
+          nodes: [
+            {
+              owner: { address: '0x0002' },
+              coinType: { repr: '0x2::sui::SUI' },
+              amount: '-500000000000',
+            },
+            {
+              owner: { address: '0x0001' },
+              coinType: { repr: '0x2::sui::SUI' },
+              amount: '500000000000',
+            },
+          ],
         },
-        {
-          owner: { AddressOwner: '0x0001' },
-          coinType: '0x2::sui::SUI',
-          amount: '500000000000',
-        },
-      ],
+      },
     },
     '0x0001',
     9
@@ -126,23 +130,27 @@ test('verifyMemberContributionOnSui: handles unconfigured Tatum, malformed diges
     },
   ]
 
-  const lateRpcCaller = async (_chain, body) => {
-    assert.equal(body.method, 'sui_getTransactionBlock')
+  const lateGqlCaller = async (_chain, _query, variables) => {
+    assert.equal(variables.digest, VALID_DIGEST_1)
     return makeRpcResponse({
-      jsonrpc: '2.0',
-      id: 1,
-      result: {
-        digest: VALID_DIGEST_1,
-        timestampMs: String(Date.parse('2026-09-03T10:00:00Z')), // ~34h after windowEnd (within 72h grace)
-        transaction: { data: { sender: '0x0002' } },
-        effects: { status: { status: 'success' } },
-        balanceChanges: [
-          {
-            owner: { AddressOwner: '0x0001' },
-            coinType: '0x2::sui::SUI',
-            amount: '500000000000',
+      data: {
+        transaction: {
+          digest: VALID_DIGEST_1,
+          sender: { address: '0x0002' },
+          effects: {
+            status: 'SUCCESS',
+            timestamp: '2026-09-03T10:00:00Z', // ~34h after windowEnd (within 72h grace)
+            balanceChanges: {
+              nodes: [
+                {
+                  owner: { address: '0x0001' },
+                  coinType: { repr: '0x2::sui::SUI' },
+                  amount: '500000000000',
+                },
+              ],
+            },
           },
-        ],
+        },
       },
     })
   }
@@ -154,7 +162,7 @@ test('verifyMemberContributionOnSui: handles unconfigured Tatum, malformed diges
       withMemory: true,
       memories: graceMemories,
     },
-    { env: TEST_ENV, fetchRpc: lateRpcCaller }
+    { env: TEST_ENV, fetchGraphql: lateGqlCaller }
   )
   assert.equal(lateWithMem.status, 'Late')
   assert.equal(lateWithMem.policy.chainStatus, 'Late')
@@ -168,7 +176,7 @@ test('verifyMemberContributionOnSui: handles unconfigured Tatum, malformed diges
       withMemory: false,
       memories: graceMemories,
     },
-    { env: TEST_ENV, fetchRpc: lateRpcCaller }
+    { env: TEST_ENV, fetchGraphql: lateGqlCaller }
   )
   assert.equal(lateWithoutMem.status, 'Late')
   assert.equal(lateWithoutMem.policy.chainStatus, 'Late')
@@ -178,27 +186,31 @@ test('verifyMemberContributionOnSui: handles unconfigured Tatum, malformed diges
   // 5. Split payments: 2 sequential partial digests for member 0x0005 within 48h -> aggregated to Verified
   clearSubmittedDigests('test-circle-sui', 5, '0x0002')
   clearSubmittedDigests('test-circle-sui', 5, '0x0005')
-  const splitRpcCaller = async (_chain, body) => {
-    const requestedDigest = body.params[0]
+  const splitGqlCaller = async (_chain, _query, variables) => {
+    const requestedDigest = variables.digest
     const ts =
       requestedDigest === VALID_DIGEST_1
-        ? Date.parse('2026-09-01T06:00:00Z')
-        : Date.parse('2026-09-01T18:00:00Z')
+        ? '2026-09-01T06:00:00Z'
+        : '2026-09-01T18:00:00Z'
     return makeRpcResponse({
-      jsonrpc: '2.0',
-      id: 1,
-      result: {
-        digest: requestedDigest,
-        timestampMs: String(ts),
-        transaction: { data: { sender: '0x0005' } },
-        effects: { status: { status: 'success' } },
-        balanceChanges: [
-          {
-            owner: { AddressOwner: '0x0001' },
-            coinType: '0x2::sui::SUI',
-            amount: '250000000000', // 250 SUI each
+      data: {
+        transaction: {
+          digest: requestedDigest,
+          sender: { address: '0x0005' },
+          effects: {
+            status: 'SUCCESS',
+            timestamp: ts,
+            balanceChanges: {
+              nodes: [
+                {
+                  owner: { address: '0x0001' },
+                  coinType: { repr: '0x2::sui::SUI' },
+                  amount: '250000000000', // 250 SUI each
+                },
+              ],
+            },
           },
-        ],
+        },
       },
     })
   }
@@ -211,7 +223,7 @@ test('verifyMemberContributionOnSui: handles unconfigured Tatum, malformed diges
       memberName: 'Emeka Nwosu',
       txDigest: VALID_DIGEST_1,
     },
-    { env: TEST_ENV, fetchRpc: splitRpcCaller }
+    { env: TEST_ENV, fetchGraphql: splitGqlCaller }
   )
   assert.equal(tranche1.status, 'Partial')
   assert.equal(tranche1.amountReceived, 250)
@@ -224,7 +236,7 @@ test('verifyMemberContributionOnSui: handles unconfigured Tatum, malformed diges
       memberName: 'Emeka Nwosu',
       txDigest: VALID_DIGEST_2,
     },
-    { env: TEST_ENV, fetchRpc: splitRpcCaller }
+    { env: TEST_ENV, fetchGraphql: splitGqlCaller }
   )
   assert.equal(tranche2.status, 'Verified')
   assert.equal(tranche2.amountReceived, 500)

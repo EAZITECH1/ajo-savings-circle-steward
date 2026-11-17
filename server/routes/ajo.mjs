@@ -228,14 +228,15 @@ router.post('/register-circle', async (req, res) => {
 
 /**
  * GET /api/ajo/overview
- * Returns circles overview with state and next deadlines.
+ * Returns circles overview for the authenticated wallet with state and next deadlines.
  */
-router.get('/overview', async (_req, res) => {
+router.get('/overview', async (req, res) => {
   try {
-    const circles = listCircleRosters()
+    const session = requireWalletSession(req)
+    const circles = listCircleRosters({ memberAddress: session.walletAddress })
     res.json({ circles })
   } catch (err) {
-    res.status(500).json({ error: err.message || 'Failed to fetch circles overview' })
+    res.status(err?.statusCode || 500).json({ error: err.message || 'Failed to fetch circles overview' })
   }
 })
 

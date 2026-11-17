@@ -54,16 +54,6 @@ export async function tatumFetch(path, init = {}, env = process.env) {
   })
 }
 
-export async function tatumRpc(chain, body, network, env = process.env) {
-  const { tunables } = getTatumContext(env)
-  return fetch(tatumGatewayUrl(chain, network, env), {
-    method: 'POST',
-    signal: AbortSignal.timeout(tunables.requestTimeoutMs),
-    headers: withKey({ 'Content-Type': 'application/json' }, env),
-    body: JSON.stringify(body),
-  })
-}
-
 export async function tatumGraphql(chain, query, variables = {}, network, env = process.env) {
   const { tunables } = getTatumContext(env)
   return fetch(`${tatumGatewayUrl(chain, network, env)}/graphql`, {

@@ -42,43 +42,6 @@ function mapAuthErrorStatus(err, fallback = 400) {
  * never contaminate new circles or updated settings.
  */
 function resolveCircleContext(circleId, walletAddress, options = {}) {
-  // If fresh circleConfig is passed with the request for this circleId,
-  // update the registered circle roster so old circle settings never contaminate new circles or updates.
-  if (options.circleConfig && options.circleConfig.circleId === circleId) {
-    const incomingCfg = options.circleConfig
-    const membersList =
-      Array.isArray(incomingCfg.members) && incomingCfg.members.length > 0
-        ? [...incomingCfg.members]
-        : []
-    if (
-      walletAddress &&
-      !membersList.some(
-        (m) => normalizeSuiAddress(m.address) === normalizeSuiAddress(walletAddress)
-      )
-    ) {
-      membersList.push({
-        id: options.memberId || `m_${membersList.length + 1}`,
-        name: options.memberName || 'Member',
-        address: walletAddress,
-      })
-    }
-    try {
-      upsertCircleRoster({
-        ...incomingCfg,
-        circleId,
-        circleName: incomingCfg.circleName || options.circleName || circleId,
-        poolAddress: incomingCfg.poolAddress || options.poolAddress || '',
-        contributionPerMember:
-          Number(options.expectedAmount) > 0
-            ? Number(options.expectedAmount)
-            : Number(incomingCfg.contributionPerMember) || 0,
-        members: membersList,
-      })
-    } catch {
-      // Continue if roster validation or duplicate check needs standard resolution
-    }
-  }
-
   try {
     return verifyCircleMembership(circleId, { memberAddress: walletAddress })
   } catch (err) {
@@ -113,19 +76,10 @@ function resolveCircleContext(circleId, walletAddress, options = {}) {
 
       if (cfg) {
         const membersList = Array.isArray(cfg.members) ? [...cfg.members] : []
-        if (
-          walletAddress &&
-          !membersList.some(
-            (m) => normalizeSuiAddress(m.address) === normalizeSuiAddress(walletAddress)
-          )
-        ) {
-          membersList.push({
-            id: `m_${membersList.length + 1}`,
-            name: options.memberName || 'Member',
-            address: walletAddress,
-          })
-        }
-        upsertCircleRoster({ ...cfg, members: membersList })
+        upsertCircleRoster(
+          { ...cfg, members: membersList },
+          { authenticatedWalletAddress: walletAddress }
+        )
         return verifyCircleMembership(circleId, { memberAddress: walletAddress })
       }
     }

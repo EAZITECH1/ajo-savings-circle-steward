@@ -7,6 +7,7 @@ import authRoutes from '../server/routes/auth.mjs'
 import memoryRoutes from '../server/routes/memory.mjs'
 import tatumRoutes from '../server/routes/tatum.mjs'
 import stewardRoutes from '../server/routes/steward.mjs'
+import ajoRoutes from '../server/routes/ajo.mjs'
 
 function createTestApp() {
   const app = express()
@@ -15,6 +16,7 @@ function createTestApp() {
   app.use('/api/memory', memoryRoutes)
   app.use('/api/tatum', tatumRoutes)
   app.use('/api/steward', stewardRoutes)
+  app.use('/api/ajo', ajoRoutes)
   return app
 }
 
@@ -68,6 +70,7 @@ test('Route Authorization: blocks unauthenticated requests (401) and non-member 
       { method: 'POST', path: '/api/tatum/sui/clear-digests', body: { circleId: 'c1', memberAddress: '0x1' } },
       { method: 'POST', path: '/api/steward/chat', body: { circleId: 'c1', message: 'hi' } },
       { method: 'POST', path: '/api/steward/payout-recommendation', body: { circleId: 'c1', cycle: 1 } },
+      { method: 'GET', path: '/api/ajo/overview' },
     ]
 
     for (const r of unauthRoutes) {
@@ -83,16 +86,19 @@ test('Route Authorization: blocks unauthenticated requests (401) and non-member 
       )
     }
 
-    // 2. Authenticate two wallets: Member 1 (in circle) and Outsider (not in circle)
+    // 2. Authenticate wallets: Member 1 (organizer), Member 2 (non-organizer member), and Outsider
     const kpMember1 = new Ed25519Keypair()
+    const kpMember2 = new Ed25519Keypair()
     const kpOutsider = new Ed25519Keypair()
     const addr1 = kpMember1.getPublicKey().toSuiAddress()
+    const addr2 = kpMember2.getPublicKey().toSuiAddress()
     const addrOutsider = kpOutsider.getPublicKey().toSuiAddress()
 
     const sessionMember1 = await loginWithKeypair(baseUrl, kpMember1)
+    const sessionMember2 = await loginWithKeypair(baseUrl, kpMember2)
     const sessionOutsider = await loginWithKeypair(baseUrl, kpOutsider)
 
-    // 3. Member 1 registers a circle where Member 1 is in the roster
+    // 3. Member 1 registers a circle where Member 1 is organizer and Member 2 is a member
     const regRes = await fetch(`${baseUrl}/api/memory/circles`, {
       method: 'POST',
       headers: {
@@ -107,7 +113,10 @@ test('Route Authorization: blocks unauthenticated requests (401) and non-member 
         tokenType: '0x2::sui::SUI',
         cycleLength: 'Monthly',
         currentCycle: 1,
-        members: [{ id: 'm1', name: 'Organizer One', address: addr1 }],
+        members: [
+          { id: 'm1', name: 'Organizer One', address: addr1 },
+          { id: 'm2', name: 'Member Two', address: addr2 },
+        ],
       }),
     })
     assert.equal(regRes.status, 200)
@@ -186,6 +195,58 @@ test('Route Authorization: blocks unauthenticated requests (401) and non-member 
       }),
     })
     assert.equal(dupWalletRes.status, 409)
+
+    // 7. Outsider cannot hijack `secure-circle-1` by passing a forged `circleConfig` to Tatum routes
+    const hijackRes = await fetch(`${baseUrl}/api/tatum/sui/verify-contribution`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${sessionOutsider.token}`,
+      },
+      body: JSON.stringify({
+        circleId: 'secure-circle-1',
+        circleConfig: {
+          circleId: 'secure-circle-1',
+          circleName: 'Hijacked Circle',
+          poolAddress: '0x978095921852e2fe53ea7fae4f69f2c7285e365d07450cace661c3553c3c4b33',
+          contributionPerMember: 1,
+          members: [{ id: 'm99', name: 'Attacker', address: addrOutsider }],
+        },
+      }),
+    })
+    assert.equal(hijackRes.status, 403)
+
+    // 8. Non-organizer member cannot overwrite escrow parameters (poolAddress / contributionPerMember / members)
+    const nonOrgEscrowRes = await fetch(`${baseUrl}/api/memory/circles`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${sessionMember2.token}`,
+      },
+      body: JSON.stringify({
+        circleId: 'secure-circle-1',
+        circleName: 'Secure Circle 1',
+        poolAddress: '0x1111111111111111111111111111111111111111111111111111111111111111',
+        contributionPerMember: 999,
+        tokenType: '0x2::sui::SUI',
+        cycleLength: 'Monthly',
+        currentCycle: 1,
+        members: [
+          { id: 'm1', name: 'Organizer One', address: addr1 },
+          { id: 'm2', name: 'Member Two', address: addr2 },
+        ],
+      }),
+    })
+    assert.equal(nonOrgEscrowRes.status, 403)
+
+    // 9. Outsider calling `/api/ajo/overview` does NOT see `secure-circle-1`
+    const overviewRes = await fetch(`${baseUrl}/api/ajo/overview`, {
+      headers: { Authorization: `Bearer ${sessionOutsider.token}` },
+    }).then((r) => r.json())
+    assert.equal(
+      overviewRes.circles.some((c) => c.circleId === 'secure-circle-1'),
+      false
+    )
   } finally {
     await new Promise((resolve) => server.close(resolve))
   }
